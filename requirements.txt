@@ -1,0 +1,25 @@
+# Multi-Camera Person Tracking Pipeline
+# YOLOv8 + TransReID (ViT-Base)
+
+# Core deep learning
+torch>=2.0.0
+torchvision>=0.15.0
+
+# ViT backbone for TransReID
+timm>=0.9.0
+
+# Person detection + tracking (YOLOv8 + ByteTrack)
+ultralytics>=8.0.0
+
+# Video I/O
+opencv-python>=4.8.0
+
+# Numerics
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Download TransReID weights from Google Drive
+gdown>=4.7.1
+
+# Progress bars
+tqdm>=4.65.0
