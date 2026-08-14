@@ -93,6 +93,7 @@ class CameraWorker:
 
         # Cache: local_id → global_id between Re-ID intervals
         self._id_cache: Dict[int, int] = {}
+        self._photo_taken_for_local_id: Set[int] = set()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -190,10 +191,12 @@ class CameraWorker:
                 )
 
                 batch_items: List[Tuple[int, Optional[np.ndarray]]] = []
+                local_id_to_crop = {}
                 emb_ptr = 0
                 for idx, d in enumerate(detections):
                     if idx in valid_indices:
                         batch_items.append((d.local_id, extracted_embs[emb_ptr]))
+                        local_id_to_crop[d.local_id] = crops_to_extract[emb_ptr]
                         emb_ptr += 1
                     else:
                         batch_items.append((d.local_id, None))
@@ -224,6 +227,12 @@ class CameraWorker:
 
                 matched = self.gallery.match_batch(self.camera_id, self.frame_idx, batch_items)
                 self._id_cache.update(matched)
+
+                # Send thumbnails for new appearances (1 photo per local track)
+                for tid, gid in matched.items():
+                    if tid in local_id_to_crop and tid not in self._photo_taken_for_local_id:
+                        self.gallery.add_thumbnail_to_entry(gid, local_id_to_crop[tid], self.camera_id)
+                        self._photo_taken_for_local_id.add(tid)
 
             # ── Periodic gallery cleanup ─────────────────────────────────────
             if self.frame_idx % 60 == 0:

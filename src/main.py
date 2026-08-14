@@ -237,6 +237,9 @@ def main() -> None:
         if show_preview:
             cv2.destroyAllWindows()
 
+    # ── Generate Summary Report ───────────────────────────────────────────────
+    gallery.generate_html_report("output")
+
     # ── Summary ───────────────────────────────────────────────────────────────
     print()
     print("╔══════════════════════════════════════════════════════╗")
