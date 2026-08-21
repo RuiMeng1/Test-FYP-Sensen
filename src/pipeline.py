@@ -32,6 +32,21 @@ from src.gallery import GlobalGallery
 from src.reid_model import TransReIDEncoder
 
 
+# ── Colour Normalisation ──────────────────────────────────────────────────────
+def normalize_color(image: np.ndarray) -> np.ndarray:
+    """
+    Normalises the colour of an image using the Gray World assumption.
+    This helps to correct colour casts caused by different camera sensors/lighting,
+    ensuring that colours are consistent across multiple cameras for ReID.
+    """
+    means = np.mean(image, axis=(0, 1))
+    if np.any(means == 0):
+        return image
+    gray_mean = np.mean(means)
+    scales = gray_mean / means
+    return np.clip(image * scales, 0, 255).astype(np.uint8)
+
+
 # ── Colour palette for global IDs ────────────────────────────────────────────
 _PALETTE: List[Tuple[int, int, int]] = [
     (60, 180, 255),  (50, 220,  50),  (255,  80,  80),  (255, 200,  50),
@@ -150,6 +165,12 @@ class CameraWorker:
 
             # ── Detection via shared dispatcher (round-robin, synchronized) ──
             detections = self.dispatcher.detect(self.cam_idx, frame, self.camera_id)
+
+            # ── Normalise Colour ──
+            # Normalise the frame's colours to correct camera-specific tints.
+            # Doing this after detection preserves YOLO's accuracy while 
+            # providing consistent colours for Re-ID crops and the final output.
+            frame = normalize_color(frame)
 
             # ── Exclusion Zone Filtering ──
             if self.video_path.name in EXCLUSION_ZONES:
