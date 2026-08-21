@@ -8,6 +8,9 @@ torchvision>=0.15.0
 # ViT backbone for TransReID
 timm>=0.9.0
 
+# HuggingFace Transformers (PersonViT-ReID AutoModel loading)
+transformers>=4.35.0
+
 # Person detection + tracking (YOLOv8 + ByteTrack)
 ultralytics>=8.0.0
 
