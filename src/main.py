@@ -101,6 +101,7 @@ def main() -> None:
     from src.video_loader import parse_args, get_video_paths
     from src.config import DEVICE, REID_DEVICE, REID_EVERY_N_FRAMES, TRANSREID_WEIGHTS
     from src.config import REID_THRESHOLD, GALLERY_TTL_FRAMES, YOLO_MODEL_NAME
+    from src.config import REID_THRESHOLD_MATRIX
     from src.dispatcher import DetectionDispatcher
     from src.reid_model import TransReIDEncoder
     from src.gallery import GlobalGallery
@@ -144,9 +145,13 @@ def main() -> None:
     reid_model = TransReIDEncoder(weights_path=TRANSREID_WEIGHTS, device=reid_dev)
 
     print("[Setup] Initialising global gallery …")
+    # Build a camera_id -> video stem map so the gallery can resolve per-pair thresholds
+    camera_name_map = {idx + 1: vp.stem for idx, vp in enumerate(video_paths)}
     gallery = GlobalGallery(
         reid_threshold=REID_THRESHOLD,
         ttl_frames=GALLERY_TTL_FRAMES,
+        threshold_matrix=REID_THRESHOLD_MATRIX,
+        camera_name_map=camera_name_map,
     )
 
     # ── Display queue ─────────────────────────────────────────────────────────
