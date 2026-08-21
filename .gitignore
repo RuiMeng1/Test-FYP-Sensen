@@ -1,8 +1,63 @@
-
-.venv
-data
-output
+# ── Project-specific ────────────────────────────────────────────────────────
+.venv/
+data/
+output/
 config/
 models/
+
+# ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+*.whl
+
+# ── Virtual environments ─────────────────────────────────────────────────────
+env/
+venv/
+ENV/
+.env
+
+# ── Jupyter / IPython ────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── PyTorch / ML artifacts ───────────────────────────────────────────────────
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+runs/          # YOLO training runs
+wandb/         # Weights & Biases logs
+
+# ── macOS ────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# ── IDEs ─────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Testing / coverage ───────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ── Logs & temp ──────────────────────────────────────────────────────────────
+*.log
+tmp/
+temp/
