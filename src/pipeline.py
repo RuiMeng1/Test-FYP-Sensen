@@ -215,7 +215,7 @@ class CameraWorker:
                             continue
                         
                         sim = float(np.dot(emb_i, emb_j))
-                        if sim > 0.82:
+                        if sim > 0.85:  # 0.82 → 0.85: only suppress genuine reflections/duplicates
                             conf_i = detections[i].confidence
                             conf_j = detections[j].confidence
                             if conf_i < conf_j:

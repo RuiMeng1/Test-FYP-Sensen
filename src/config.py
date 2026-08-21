@@ -42,6 +42,23 @@ TRANSREID_WEIGHTS   = MODELS_DIR / "transreid_vitbase_msmt17.pth"
 # Lower = more likely to link same person; Higher = fewer false links.
 REID_THRESHOLD      = 0.65
 
+# Per-camera-pair similarity thresholds (overrides REID_THRESHOLD for specific pairs).
+# Keys are frozensets of the two video stem names (order-independent).
+# Cameras with very different angles / orientations (e.g. portrait cam3 vs
+# landscape cam1/cam2) require a lower threshold to avoid false negatives
+# caused by natural embedding drift across extreme viewpoints.
+REID_THRESHOLD_MATRIX: dict = {
+    frozenset({"cam1_20260507_160822", "cam2_20260507_160823"}): 0.65,  # similar angles
+    frozenset({"cam1_20260507_160822", "cam3_20260507_160825"}): 0.55,  # portrait vs landscape
+    frozenset({"cam2_20260507_160823", "cam3_20260507_160825"}): 0.55,  # portrait vs landscape
+}
+
+# Gallery exemplar bank settings.
+REID_MAX_EXEMPLARS  = 8      # Max stored appearance vectors per person (front, back, side, etc.)
+                              # More exemplars = more viewpoint coverage, slightly more memory.
+REID_EMA_ALPHA      = 0.15   # EMA blend factor when refining a near-duplicate exemplar.
+                              # Higher = faster adaptation; lower = more stable.
+
 REID_EVERY_N_FRAMES = 5      # Extract Re-ID features every N frames (CPU speed trade-off)
                               # Lower = more accurate, slower. Increase to 10+ on slow machines.
 

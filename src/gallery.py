@@ -15,6 +15,16 @@ Core improvements:
      Tracks from the same camera can re-match previous identities if the track
      was lost (e.g. occlusion / turn-around), provided that identity is not
      currently claimed by another person visible in the same frame.
+
+  4. Per-Camera-Pair Similarity Thresholds (improve/reid-robustness):
+     Cameras with extreme angle differences (e.g. portrait vs landscape) use a
+     lower matching threshold than well-aligned pairs to reduce false negatives
+     caused by natural embedding drift across viewpoints.
+
+  5. Larger Exemplar Bank + Cross-Camera Relaxed Contamination Guard:
+     Bank size raised from 6 → 8 for better viewpoint diversity.
+     Cross-camera exemplar updates use a looser contamination floor since
+     different-camera appearances are inherently more dissimilar.
 """
 
 from __future__ import annotations
@@ -60,18 +70,22 @@ class GalleryEntry:
     def add_or_update_exemplar(
         self,
         new_emb: np.ndarray,
-        max_exemplars: int = 6,
+        max_exemplars: int = 8,
         dup_thresh: float = 0.92,
         ema_alpha: float = 0.15,
         min_update_sim: float = 0.60,
+        is_cross_camera: bool = False,
     ) -> bool:
         """
         Maintains a diverse set of appearance vectors (e.g. front/back/side) with Contamination Guard.
+
         - If new_emb has very low similarity (< min_update_sim) to existing exemplars of this person,
           reject the update to prevent gallery contamination from misidentified frames/occlusions.
+          Cross-camera updates use a lower floor (is_cross_camera=True) because viewpoint shift
+          naturally pushes embeddings further apart even for the same person.
         - If new_emb is almost identical (>= dup_thresh), EMA-refine the closest exemplar.
         - If new_emb captures a genuine new angle/pose, append to the bank.
-        - If bank is full, replace the closest redundant exemplar.
+        - If bank is full, replace the closest existing exemplar (least diverse w.r.t. new_emb).
 
         Returns True if the exemplar was accepted/updated, False if rejected by contamination guard.
         """
@@ -87,8 +101,10 @@ class GalleryEntry:
         best_idx = int(np.argmax(sims))
         best_sim = sims[best_idx]
 
-        # Contamination Guard: Don't pollute the gallery if this crop is too alien to this person
-        if best_sim < min_update_sim:
+        # Contamination Guard: reject updates that are too dissimilar from known appearances.
+        # Cross-camera updates get a relaxed floor since viewpoint drift is expected.
+        effective_min_sim = min_update_sim * (0.85 if is_cross_camera else 1.0)
+        if best_sim < effective_min_sim:
             return False
 
         if best_sim >= dup_thresh:
@@ -97,10 +113,10 @@ class GalleryEntry:
             updated /= (np.linalg.norm(updated) + 1e-8)
             self.embeddings[best_idx] = updated.astype(np.float32)
         elif len(self.embeddings) < max_exemplars:
-            # Add as new appearance variation (e.g. back view or different lighting)
+            # Add as new appearance variation (e.g. back view, different lighting, or new camera angle)
             self.embeddings.append(new_emb.copy())
         else:
-            # Bank is full: replace the closest existing exemplar
+            # Bank is full: replace the closest existing exemplar (most redundant w.r.t. new_emb)
             self.embeddings[best_idx] = new_emb.copy()
 
         return True
@@ -112,16 +128,30 @@ class GlobalGallery:
     Thread-safe: protected by a re-entrant threading.RLock.
     """
 
-    MAX_EXEMPLARS_PER_PERSON = 6
+    MAX_EXEMPLARS_PER_PERSON = 8  # Raised from 6 for better viewpoint diversity
 
-    def __init__(self, reid_threshold: float = 0.65, ttl_frames: int = 50000):
+    def __init__(
+        self,
+        reid_threshold: float = 0.65,
+        ttl_frames: int = 50000,
+        threshold_matrix: Optional[Dict] = None,
+        camera_name_map: Optional[Dict[int, str]] = None,
+    ):
         """
         Args:
-            reid_threshold: Cosine similarity cutoff for matching to an existing person.
-            ttl_frames:     Frames of continuous absence before an identity expires.
+            reid_threshold:   Default cosine similarity cutoff for all camera pairs.
+            ttl_frames:       Frames of continuous absence before an identity expires.
+            threshold_matrix: Optional dict keyed by frozenset({stem_a, stem_b}) with
+                              per-pair similarity thresholds.  When two cameras have very
+                              different angles (e.g. portrait vs landscape) a lower value
+                              (e.g. 0.55) reduces false negatives from viewpoint drift.
+            camera_name_map:  Maps camera_id (int) -> video stem (str) so the gallery
+                              can look up the per-pair threshold at match time.
         """
-        self.reid_threshold = reid_threshold
-        self.ttl_frames = ttl_frames
+        self.reid_threshold    = reid_threshold
+        self.ttl_frames        = ttl_frames
+        self._threshold_matrix = threshold_matrix or {}
+        self._camera_name_map  = camera_name_map  or {}  # {camera_id: video_stem}
 
         self._lock = threading.RLock()
         self._entries: Dict[int, GalleryEntry] = {}
@@ -129,6 +159,18 @@ class GlobalGallery:
 
         # (camera_id, local_id) -> global_id (fast continuity for ongoing ByteTrack tracks)
         self._local_map: Dict[Tuple[int, int], int] = {}
+
+    # ── Threshold helpers ─────────────────────────────────────────────────────
+
+    def _get_threshold(self, cam_a: int, cam_b: int) -> float:
+        """Return per-pair threshold if configured, otherwise fall back to global default."""
+        name_a = self._camera_name_map.get(cam_a)
+        name_b = self._camera_name_map.get(cam_b)
+        if name_a and name_b:
+            key = frozenset({name_a, name_b})
+            if key in self._threshold_matrix:
+                return self._threshold_matrix[key]
+        return self.reid_threshold
 
     # ── Public Batch API (Enforces Mutual Exclusivity) ─────────────────────────
 
@@ -140,6 +182,10 @@ class GlobalGallery:
     ) -> Dict[int, int]:
         """
         Match all detections in a single camera frame simultaneously with mutual exclusivity.
+
+        Uses per-camera-pair thresholds when configured so that camera pairs with
+        extreme angle differences (e.g. portrait cam3 vs landscape cam1/cam2) apply
+        a lower similarity cutoff, reducing false negatives from viewpoint drift.
 
         Args:
             camera_id:   Integer camera identifier.
@@ -166,7 +212,7 @@ class GlobalGallery:
                     if gid in self._entries:
                         # Ongoing known track
                         entry = self._entries[gid]
-                        
+
                         # Verify identity stability if embedding is available
                         current_sim = entry.similarity(emb) if emb is not None else 1.0
 
@@ -178,11 +224,12 @@ class GlobalGallery:
                             continue
 
                         if emb is not None:
-                            # Contamination guard prevents bad frames from corrupting exemplar bank
+                            # Same-camera update: use standard contamination guard
                             entry.add_or_update_exemplar(
-                                emb, 
+                                emb,
                                 max_exemplars=self.MAX_EXEMPLARS_PER_PERSON,
-                                min_update_sim=max(0.60, self.reid_threshold - 0.05)
+                                min_update_sim=max(0.60, self.reid_threshold - 0.05),
+                                is_cross_camera=False,
                             )
                         entry.last_seen_frame = frame_idx
                         entry.last_camera_id = camera_id
@@ -207,29 +254,47 @@ class GlobalGallery:
                 if gid not in claimed_gids_in_frame
             ]
 
-            # Build list of potential matches: (similarity, local_id, gid, emb)
-            match_proposals: List[Tuple[float, int, int, np.ndarray]] = []
+            # Build list of potential matches: (similarity, local_id, gid, emb, threshold)
+            match_proposals: List[Tuple[float, int, int, np.ndarray, float]] = []
 
             for local_id, emb in unmapped_detections:
                 if emb is None:
                     continue
                 for gid in candidates:
-                    sim = self._entries[gid].similarity(emb)
-                    if sim >= self.reid_threshold:
-                        match_proposals.append((sim, local_id, gid, emb))
+                    entry = self._entries[gid]
+                    # Determine threshold: use per-pair if the candidate was last seen on a
+                    # different camera (cross-camera match); otherwise use global default.
+                    last_cam = entry.last_camera_id
+                    is_cross = (last_cam != camera_id)
+                    threshold = (
+                        self._get_threshold(camera_id, last_cam)
+                        if is_cross
+                        else self.reid_threshold
+                    )
+                    sim = entry.similarity(emb)
+                    if sim >= threshold:
+                        match_proposals.append((sim, local_id, gid, emb, threshold))
 
             # Sort proposals by similarity in descending order (highest confidence first)
             match_proposals.sort(key=lambda x: x[0], reverse=True)
 
             assigned_locals: Set[int] = set()
 
-            for sim, local_id, gid, emb in match_proposals:
+            for sim, local_id, gid, emb, threshold in match_proposals:
                 if local_id in assigned_locals or gid in claimed_gids_in_frame:
                     continue  # already assigned or claimed by a higher-similarity match
 
-                # Valid match
+                # Valid match — determine if this is a cross-camera update
                 entry = self._entries[gid]
-                entry.add_or_update_exemplar(emb, max_exemplars=self.MAX_EXEMPLARS_PER_PERSON)
+                is_cross = (entry.last_camera_id != camera_id)
+                entry.add_or_update_exemplar(
+                    emb,
+                    max_exemplars=self.MAX_EXEMPLARS_PER_PERSON,
+                    # Cross-camera updates use a relaxed contamination floor because
+                    # appearance naturally shifts more across camera viewpoints.
+                    min_update_sim=max(0.50, threshold - 0.05) if is_cross else max(0.60, threshold - 0.05),
+                    is_cross_camera=is_cross,
+                )
                 entry.last_seen_frame = frame_idx
                 entry.last_camera_id = camera_id
                 entry.hit_count += 1
