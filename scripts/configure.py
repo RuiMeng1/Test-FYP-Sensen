@@ -745,8 +745,11 @@ init();
 class ConfigHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         # Suppress default access log spam; only show errors
-        if int(args[1]) >= 400:
-            super().log_message(fmt, *args)
+        try:
+            if int(args[1]) >= 400:
+                super().log_message(fmt, *args)
+        except (IndexError, ValueError):
+            pass
 
     def _send_json(self, data: dict, status: int = 200) -> None:
         body = json.dumps(data, indent=2).encode()
