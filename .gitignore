@@ -2,5 +2,7 @@
 .venv
 data
 output
-
-
+config/
+models/
+__pycache__/
+*.pyc
