@@ -50,6 +50,11 @@ def parse_args() -> argparse.Namespace:
         help="Disable the live preview window (output videos are still saved).",
     )
     parser.add_argument(
+        "--review-only",
+        action="store_true",
+        help="Skip video processing and open the review dashboard with existing output.",
+    )
+    parser.add_argument(
         "--reid-interval",
         type=int,
         default=None,
@@ -66,6 +71,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         choices=["cpu", "cuda", "mps"],
         help="Override compute device (default: auto-detected).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=5001,
+        metavar="PORT",
+        help="Port for the web dashboard (default: 5000).",
     )
     return parser.parse_args()
 

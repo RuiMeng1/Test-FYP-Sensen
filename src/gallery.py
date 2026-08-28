@@ -366,6 +366,34 @@ class GlobalGallery:
                 entry.cameras_seen.add(camera_id)
                 entry.add_thumbnail(crop)
 
+    def get_all_entries_snapshot(self) -> List[dict]:
+        """
+        Return a thread-safe snapshot of all gallery entries for the web UI.
+        Each entry is a plain dict with serialisable fields (thumbnails as base64 JPEG).
+        """
+        import base64
+
+        snapshot: List[dict] = []
+        with self._lock:
+            for gid in sorted(self._entries.keys()):
+                entry = self._entries[gid]
+                # Encode the first thumbnail as base64 JPEG (if available)
+                thumb_b64: Optional[str] = None
+                if entry.thumbnails:
+                    ret, buf = cv2.imencode(".jpg", entry.thumbnails[0])
+                    if ret:
+                        thumb_b64 = base64.b64encode(buf).decode("utf-8")
+
+                snapshot.append({
+                    "global_id": entry.global_id,
+                    "hit_count": entry.hit_count,
+                    "cameras_seen": sorted(entry.cameras_seen),
+                    "last_camera_id": entry.last_camera_id,
+                    "last_seen_frame": entry.last_seen_frame,
+                    "thumbnail_b64": thumb_b64,
+                })
+        return snapshot
+
     @property
     def active_count(self) -> int:
         with self._lock:
