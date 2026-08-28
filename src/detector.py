@@ -56,7 +56,7 @@ class PersonDetector:
             source=frame,
             persist=True,           # Maintain tracker state across frames
             classes=[0],            # Class 0 = person only
-            conf=0.40,              # Minimum detection confidence
+            conf=0.7,              # Minimum detection confidence
             iou=0.50,               # NMS IoU threshold
             tracker="bytetrack.yaml",
             verbose=False,
@@ -84,6 +84,19 @@ class PersonDetector:
                 x1, y1 = max(0, x1), max(0, y1)
                 x2, y2 = min(w, x2), min(h, y2)
                 if x2 <= x1 or y2 <= y1:
+                    continue
+
+                box_w = x2 - x1
+                box_h = y2 - y1
+                
+                # ── Full Body Filter ──
+                # A standing person typically has an aspect ratio (height/width) between 2.0 and 3.0.
+                # If it's less than 1.5, it's likely heavily occluded (just a head/torso).
+                if box_h / box_w < 1.5:
+                    continue
+                    
+                # Ignore very small boxes far in the background (e.g., less than 15% of frame height)
+                if box_h < h * 0.15:
                     continue
 
                 detections.append(Detection(
