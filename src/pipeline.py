@@ -168,6 +168,7 @@ class CameraWorker:
                 self.camera_id, fps=src_fps,
                 total_frames=self.total_frames,
                 video_file=self.output_path.name,
+                raw_video_file=self.video_path.name,
             )
 
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -296,6 +297,14 @@ class CameraWorker:
             if self.tracking_log is not None:
                 self.tracking_log.record_frame(
                     self.camera_id, self.frame_idx, visible_gids
+                )
+                frame_dets = []
+                for det in detections:
+                    gid = self._id_cache.get(det.local_id, -1)
+                    if gid >= 0:
+                        frame_dets.append((gid, [int(v) for v in det.bbox]))
+                self.tracking_log.record_detections(
+                    self.camera_id, self.frame_idx, frame_dets
                 )
 
             # ── Write to file ─────────────────────────────────────────────────

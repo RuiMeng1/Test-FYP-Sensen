@@ -106,15 +106,40 @@ class TrackingLog:
         # {cam_id: {frame_idx: set of gids}}
         self._frame_visibility: Dict[int, Dict[int, Set[int]]] = {}
 
-    def register_camera(self, cam_id: int, fps: float, total_frames: int, video_file: str) -> None:
+        # Per-camera, per-frame bounding boxes: {cam_id: {frame_idx: [{"gid": gid, "bbox": [x1,y1,x2,y2]}]}}
+        self._detections: Dict[int, Dict[int, List[dict]]] = {}
+
+    def register_camera(
+        self,
+        cam_id: int,
+        fps: float,
+        total_frames: int,
+        video_file: str,
+        raw_video_file: str = "",
+    ) -> None:
         """Register a camera's metadata."""
         with self._lock:
             self._cameras[cam_id] = {
                 "fps": fps,
                 "total_frames": total_frames,
                 "video_file": video_file,
+                "raw_video_file": raw_video_file,
             }
             self._frame_visibility[cam_id] = {}
+            self._detections[cam_id] = {}
+
+    def record_detections(
+        self,
+        camera_id: int,
+        frame_idx: int,
+        detections: List[Tuple[int, List[int]]],
+    ) -> None:
+        """Record per-frame bounding boxes: list of (gid, [x1, y1, x2, y2])."""
+        with self._lock:
+            if detections:
+                self._detections.setdefault(camera_id, {})[frame_idx] = [
+                    {"gid": gid, "bbox": bbox} for gid, bbox in detections
+                ]
 
     def record_frame(self, camera_id: int, frame_idx: int, visible_gids: Set[int]) -> None:
         """
@@ -158,13 +183,14 @@ class TrackingLog:
         """
         with self._lock:
             cam_frames = self._frame_visibility.get(camera_id, {})
-            # Find nearest sampled frame
-            nearest = (frame_idx // 5) * 5
-            return cam_frames.get(nearest, set())
+            if not cam_frames:
+                return set()
+            sampled_idx = (frame_idx // 5) * 5
+            return cam_frames.get(sampled_idx, set())
 
     def save(self, output_path: str, gallery) -> None:
         """
-        Save the tracking log as JSON, enriched with gallery data (thumbnails, colors).
+        Save the tracking log as JSON, enriched with gallery data and per-frame detections.
         """
         import base64
         import cv2
@@ -203,9 +229,16 @@ class TrackingLog:
                     "appearances": [a.to_dict() for a in appearances],
                 }
 
+            # Convert detections dictionary to JSON serializable keys
+            detections_json = {
+                str(cid): {str(f): dets for f, dets in frames.items()}
+                for cid, frames in self._detections.items()
+            }
+
             data = {
                 "cameras": {str(k): v for k, v in self._cameras.items()},
                 "persons": persons,
+                "detections": detections_json,
             }
 
         with open(path, "w", encoding="utf-8") as f:
