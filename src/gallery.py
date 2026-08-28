@@ -108,16 +108,28 @@ class GalleryEntry:
             return False
 
         if best_sim >= dup_thresh:
-            # Refine existing exemplar with EMA
-            updated = (1.0 - ema_alpha) * self.embeddings[best_idx] + ema_alpha * new_emb
+            # Refine existing exemplar with EMA.
+            # Cap ema_alpha so that high-frequency same-camera updates don't cause
+            # runaway drift over thousands of frames (e.g. lighting change accumulates).
+            safe_alpha = min(ema_alpha, 0.10)
+            updated = (1.0 - safe_alpha) * self.embeddings[best_idx] + safe_alpha * new_emb
             updated /= (np.linalg.norm(updated) + 1e-8)
             self.embeddings[best_idx] = updated.astype(np.float32)
         elif len(self.embeddings) < max_exemplars:
             # Add as new appearance variation (e.g. back view, different lighting, or new camera angle)
             self.embeddings.append(new_emb.copy())
         else:
-            # Bank is full: replace the closest existing exemplar (most redundant w.r.t. new_emb)
-            self.embeddings[best_idx] = new_emb.copy()
+            # Bank is full: replace the LEAST DIVERSE exemplar rather than the closest to
+            # new_emb.  "Least diverse" = the one that is most similar to all OTHER exemplars
+            # (i.e. most redundant), so we preserve the widest spread of viewpoints.
+            # This prevents the bank from converging to a narrow pose cluster over time.
+            redundancy = []
+            for i, e in enumerate(self.embeddings):
+                others = [self.embeddings[j] for j in range(len(self.embeddings)) if j != i]
+                avg_sim_to_others = float(np.mean([np.dot(e, o) for o in others])) if others else 0.0
+                redundancy.append(avg_sim_to_others)
+            replace_idx = int(np.argmax(redundancy))  # most redundant slot
+            self.embeddings[replace_idx] = new_emb.copy()
 
         return True
 
@@ -216,9 +228,11 @@ class GlobalGallery:
                         # Verify identity stability if embedding is available
                         current_sim = entry.similarity(emb) if emb is not None else 1.0
 
-                        # If similarity to the assigned person is very low (< 0.50), don't blindly lock-in
-                        # Instead, allow it to be re-evaluated in Phase 2
-                        if emb is not None and current_sim < 0.50:
+                        # If similarity to the assigned person drops below threshold, don't blindly
+                        # lock-in — re-evaluate in Phase 2 to avoid carrying a drifted/wrong ID
+                        # forward for the rest of the video.  0.58 is tighter than the old 0.50
+                        # floor so contamination is caught earlier.
+                        if emb is not None and current_sim < 0.58:
                             del self._local_map[key]
                             unmapped_detections.append((local_id, emb))
                             continue
