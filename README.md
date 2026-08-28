@@ -8,11 +8,19 @@ Real-time multi-camera person detection and re-identification using **YOLOv8** (
 
 ### 1. Setup
 
-Create and activate a virtual environment, then install dependencies:
+> **⚠️ Requires Python 3.10.** Using Python 3.9 or earlier will cause errors. Check your version with `python3 --version`.
+
+Create and activate a virtual environment using **Python 3.10**, then install dependencies:
 
 ```bash
-python3 -m venv .venv
+# macOS / Linux
+python3.10 -m venv .venv
 source .venv/bin/activate
+pip install -r requirements.txt
+
+# Windows
+py -3.10 -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 

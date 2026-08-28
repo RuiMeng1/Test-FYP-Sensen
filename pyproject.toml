@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "test-fyp-sensen"
+version = "0.1.0"
+description = "Multi-Camera Person Tracking Pipeline using YOLOv8 + PersonViT"
+requires-python = ">=3.10"
+dependencies = []   # runtime deps are managed in requirements.txt
+
+[tool.setuptools]
+packages = ["src"]
