@@ -1,12 +1,15 @@
 """
 review_ui.py — Post-processing review dashboard for multi-camera person tracking.
 
-Opens after processing is complete. Loads the annotated output videos and
-tracking_log.json, providing:
+Opens after processing is complete (or via --review-only). Loads the annotated
+output videos and tracking_log.json, providing:
   - Video playback with play/pause, frame stepping, and seek slider
   - Person logger with expandable per-person appearance timelines
-  - Click-to-seek: clicking a person or appearance row seeks all cameras
-    to the frame where that person appears
+  - Auto-tracking mode: click any Person ID to full-screen their current camera
+    and automatically follow them across cameras as they move
+  - Auto-detection wait: if person is not live, waits for detection and auto full-screens
+  - Manual camera view switching: Grid View, Cam 1, Cam 2, Cam 3 buttons + double click
+  - Ranger Alert: Flashing orange title and banner when ID:000 (Ranger) is detected
 
 Runs on the main thread (macOS Cocoa/Tk requirement).
 """
@@ -16,7 +19,6 @@ from __future__ import annotations
 import base64
 import io
 import json
-import threading
 import time
 import tkinter as tk
 from pathlib import Path
@@ -28,20 +30,27 @@ from PIL import Image, ImageTk
 
 
 # ── Colour constants ─────────────────────────────────────────────────────────
-BG_PRIMARY   = "#0a0e1a"
-BG_SECONDARY = "#111827"
-BG_CARD      = "#151d2e"
-BG_ACTIVE    = "#0d2818"
-BG_EXPANDED  = "#0f1729"
-BORDER       = "#1e293b"
-BORDER_ACTIVE = "#10b981"
-TEXT_PRIMARY  = "#f1f5f9"
+BG_PRIMARY     = "#0a0e1a"
+BG_SECONDARY   = "#111827"
+BG_CARD        = "#151d2e"
+BG_ACTIVE      = "#0d2818"
+BG_EXPANDED    = "#0f1729"
+BG_TRACKED     = "#1e1b4b"
+BORDER         = "#1e293b"
+BORDER_ACTIVE  = "#10b981"
+BORDER_TRACKED = "#38bdf8"
+BORDER_RANGER  = "#ea580c"
+
+TEXT_PRIMARY   = "#f1f5f9"
 TEXT_SECONDARY = "#94a3b8"
-TEXT_MUTED    = "#64748b"
-ACCENT_GREEN  = "#10b981"
-ACCENT_BLUE   = "#3b82f6"
-ACCENT_RED    = "#ef4444"
-ACCENT_YELLOW = "#f59e0b"
+TEXT_MUTED     = "#64748b"
+ACCENT_GREEN   = "#10b981"
+ACCENT_BLUE    = "#3b82f6"
+ACCENT_RED     = "#ef4444"
+ACCENT_YELLOW  = "#f59e0b"
+ACCENT_ORANGE  = "#f97316"
+ORANGE_FLASH_1 = "#ff5500"
+ORANGE_FLASH_2 = "#992200"
 
 
 class ReviewUI:
@@ -76,12 +85,27 @@ class ReviewUI:
         self._max_frame = 0
         self._playback_fps = 25.0
 
+        # View switching state
+        self._view_mode = "grid"           # "grid" or "single"
+        self._selected_cam: Optional[int] = None  # Camera shown in single mode
+        self._tracked_gid: Optional[int] = None   # Person ID currently being tracked/followed
+
+        # Flashing alert state for Ranger (ID:000)
+        self._flash_state = False
+        self._flash_tick = 0
+
         # PhotoImage references (prevent GC)
         self._photo_refs: Dict[int, ImageTk.PhotoImage] = {}
         self._thumb_refs: Dict[int, ImageTk.PhotoImage] = {}
 
         # Expanded person cards
         self._expanded: Set[int] = set()
+
+        # UI references
+        self._cam_cards: Dict[int, tk.Frame] = {}
+        self._cam_labels: Dict[int, tk.Label] = {}
+        self._cam_overlays: Dict[int, tk.Label] = {}
+        self._cam_view_btns: Dict[str, tk.Button] = {}
 
         # Open video files
         self._open_videos()
@@ -121,7 +145,7 @@ class ReviewUI:
         self.root = tk.Tk()
         self.root.title("Sensen — Review Dashboard")
         self.root.configure(bg=BG_PRIMARY)
-        self.root.minsize(1200, 700)
+        self.root.minsize(1200, 750)
 
         # Default window size
         screen_w = self.root.winfo_screenwidth()
@@ -143,11 +167,19 @@ class ReviewUI:
         )
         logo.pack(side=tk.LEFT, padx=(16, 8), pady=8)
 
-        tk.Label(
+        self._title_label = tk.Label(
             header, text="Sensen — Review Dashboard",
             bg="#0f172a", fg=TEXT_PRIMARY,
             font=("Helvetica", 15, "bold")
-        ).pack(side=tk.LEFT, pady=8)
+        )
+        self._title_label.pack(side=tk.LEFT, pady=8)
+
+        # Ranger Alert Header Badge (when active)
+        self._ranger_header_badge = tk.Label(
+            header, text=" ⚠️ RANGA DETECTED (ID:000) ",
+            bg=ORANGE_FLASH_1, fg="white",
+            font=("Helvetica", 12, "bold"), padx=10, pady=4
+        )
 
         self._time_label = tk.Label(
             header, text="0:00 / 0:00",
@@ -156,17 +188,37 @@ class ReviewUI:
         )
         self._time_label.pack(side=tk.RIGHT, padx=16, pady=8)
 
-        # ── Main content ──────────────────────────────────────────────────────
-        content = tk.Frame(self.root, bg=BG_PRIMARY)
-        content.pack(fill=tk.BOTH, expand=True)
+        # ── Ranger Flashing Alert Banner ───────────────────────────────────────
+        self._ranger_banner = tk.Frame(self.root, bg=ORANGE_FLASH_1, height=36)
+        self._ranger_banner_label = tk.Label(
+            self._ranger_banner,
+            text="🚨  RANGA DETECTED  —  PERSON ID:000 IS ACTIVE ON CAMERA FEED  🚨",
+            bg=ORANGE_FLASH_1, fg="white",
+            font=("Helvetica", 12, "bold")
+        )
+        self._ranger_banner_label.pack(fill=tk.BOTH, expand=True, pady=6)
+        # Note: packed dynamically when Ranger is detected!
 
-        # Left: Camera feeds + playback controls
-        left_panel = tk.Frame(content, bg=BG_PRIMARY)
+        # ── Main content ──────────────────────────────────────────────────────
+        self._content = tk.Frame(self.root, bg=BG_PRIMARY)
+        self._content.pack(fill=tk.BOTH, expand=True)
+
+        # Right: Logger panel (packed first to guarantee width and visibility)
+        logger_panel = tk.Frame(self._content, bg=BG_SECONDARY, width=420)
+        logger_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=8)
+        logger_panel.pack_propagate(False)
+        self._build_logger(logger_panel)
+
+        # Left: Camera feeds + View Switcher + Playback controls
+        left_panel = tk.Frame(self._content, bg=BG_PRIMARY)
         left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Camera grid
+        # View Switcher Bar (above camera view)
+        self._build_view_switcher(left_panel)
+
+        # Camera grid / single container
         self._camera_frame = tk.Frame(left_panel, bg=BG_PRIMARY)
-        self._camera_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(8, 4))
+        self._camera_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 4))
 
         # Playback controls
         controls = tk.Frame(left_panel, bg="#0f172a", height=56)
@@ -174,16 +226,9 @@ class ReviewUI:
         controls.pack_propagate(False)
         self._build_controls(controls)
 
-        # Right: Logger panel
-        logger_panel = tk.Frame(content, bg=BG_SECONDARY, width=400)
-        logger_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=8)
-        logger_panel.pack_propagate(False)
-        self._build_logger(logger_panel)
-
-        # ── Camera tiles ──────────────────────────────────────────────────────
-        self._cam_labels: Dict[int, tk.Label] = {}
-        self._cam_overlays: Dict[int, tk.Label] = {}
-        self._build_camera_grid()
+        # ── Build Camera Tiles ────────────────────────────────────────────────
+        self._build_camera_tiles()
+        self._apply_view_layout()
 
         # ── Status bar ────────────────────────────────────────────────────────
         status_bar = tk.Frame(self.root, bg="#0f172a", height=32)
@@ -199,9 +244,60 @@ class ReviewUI:
         self._status_label.pack(side=tk.LEFT, padx=12, pady=4)
 
         tk.Label(
-            status_bar, text="Sensen Multi-Camera Tracking System",
-            bg="#0f172a", fg="#334155", font=("Helvetica", 10)
+            status_bar, text="Click Person to Auto-Follow  •  Double-Click Camera to Expand",
+            bg="#0f172a", fg="#475569", font=("Helvetica", 10)
         ).pack(side=tk.RIGHT, padx=16, pady=4)
+
+    def _build_view_switcher(self, parent: tk.Frame) -> None:
+        """Toolbar with manual view switching buttons and auto-tracking status."""
+        bar = tk.Frame(parent, bg="#0f172a", height=42)
+        bar.pack(fill=tk.X, padx=8, pady=(8, 0))
+        bar.pack_propagate(False)
+
+        tk.Label(
+            bar, text="VIEW:", bg="#0f172a", fg=TEXT_MUTED,
+            font=("Menlo", 9, "bold")
+        ).pack(side=tk.LEFT, padx=(12, 6), pady=8)
+
+        btn_style = {
+            "bg": "#1e293b", "fg": TEXT_PRIMARY, "font": ("Helvetica", 10, "bold"),
+            "bd": 0, "activebackground": "#334155", "activeforeground": "white",
+            "cursor": "hand2", "padx": 10, "pady": 3
+        }
+
+        # Grid view button
+        self._btn_grid = tk.Button(
+            bar, text="▦ All Cameras (Grid)",
+            command=self._set_view_grid, **btn_style
+        )
+        self._btn_grid.pack(side=tk.LEFT, padx=3, pady=6)
+        self._cam_view_btns["grid"] = self._btn_grid
+
+        # Per-camera buttons
+        for cam_id in sorted(self._caps.keys()):
+            b = tk.Button(
+                bar, text=f"📷 Cam {cam_id}",
+                command=lambda c=cam_id: self._set_view_camera(c), **btn_style
+            )
+            b.pack(side=tk.LEFT, padx=3, pady=6)
+            self._cam_view_btns[f"cam_{cam_id}"] = b
+
+        # Auto-tracking indicator / stop button
+        self._tracking_status_frame = tk.Frame(bar, bg="#0f172a")
+        self._tracking_status_frame.pack(side=tk.RIGHT, padx=12, pady=6)
+
+        self._tracking_badge = tk.Label(
+            self._tracking_status_frame, text="",
+            bg=BG_TRACKED, fg=BORDER_TRACKED,
+            font=("Menlo", 10, "bold"), padx=8, pady=2
+        )
+        self._tracking_stop_btn = tk.Button(
+            self._tracking_status_frame, text=" ✕ Stop Tracking ",
+            command=self._stop_tracking,
+            bg="#ef4444", fg="white", font=("Helvetica", 9, "bold"),
+            bd=0, activebackground="#dc2626", activeforeground="white",
+            cursor="hand2", padx=6, pady=2
+        )
 
     def _build_controls(self, parent: tk.Frame) -> None:
         """Build playback controls: step back, play/pause, step forward, seek slider."""
@@ -243,7 +339,6 @@ class ReviewUI:
 
     def _build_logger(self, parent: tk.Frame) -> None:
         """Build the person logger panel."""
-        # Header
         header = tk.Frame(parent, bg=BG_SECONDARY)
         header.pack(fill=tk.X, padx=12, pady=(12, 8))
 
@@ -254,11 +349,17 @@ class ReviewUI:
         ).pack(side=tk.LEFT)
 
         self._count_label = tk.Label(
-            header, text=str(len(self.persons)),
+            header, text=f"{len(self.persons)} IDs",
             bg=ACCENT_BLUE, fg="white",
-            font=("Menlo", 11, "bold"), padx=8, pady=1
+            font=("Menlo", 10, "bold"), padx=8, pady=2
         )
         self._count_label.pack(side=tk.RIGHT)
+
+        hint = tk.Label(
+            parent, text="Click any person to auto-follow across cameras",
+            bg=BG_SECONDARY, fg=TEXT_MUTED, font=("Helvetica", 9, "italic")
+        )
+        hint.pack(fill=tk.X, padx=12, pady=(0, 6))
 
         # Separator
         tk.Frame(parent, bg=BORDER, height=1).pack(fill=tk.X, padx=8)
@@ -297,29 +398,18 @@ class ReviewUI:
         )
         self._canvas.bind_all("<MouseWheel>", self._on_mousewheel)
 
-        # Build initial person cards
         self._build_person_cards()
 
-    def _build_camera_grid(self) -> None:
-        """Create camera tiles in a 2-column grid."""
-        cols = 2
-        cam_ids = sorted(self._caps.keys())
-        n_rows = (len(cam_ids) + cols - 1) // cols
+    # ── Camera Tiles & Layout ─────────────────────────────────────────────────
 
-        for r in range(n_rows):
-            self._camera_frame.grid_rowconfigure(r, weight=1, uniform="cam_row", minsize=200)
-        for c in range(cols):
-            self._camera_frame.grid_columnconfigure(c, weight=1, uniform="cam_col", minsize=300)
-
-        for idx, cam_id in enumerate(cam_ids):
-            row, col = divmod(idx, cols)
-
+    def _build_camera_tiles(self) -> None:
+        """Create camera tile widgets."""
+        for cam_id in sorted(self._caps.keys()):
             card = tk.Frame(self._camera_frame, bg=BG_SECONDARY, bd=0)
-            card.grid(row=row, column=col, padx=4, pady=4, sticky="nsew")
             card.grid_rowconfigure(0, weight=1)
             card.grid_columnconfigure(0, weight=1)
 
-            cam_label = tk.Label(card, bg="black", bd=0, anchor="center")
+            cam_label = tk.Label(card, bg="black", bd=0, anchor="center", cursor="hand2")
             cam_label.grid(row=0, column=0, sticky="nsew")
             self._cam_labels[cam_id] = cam_label
 
@@ -330,6 +420,150 @@ class ReviewUI:
             )
             overlay.place(x=8, y=8)
             self._cam_overlays[cam_id] = overlay
+            self._cam_cards[cam_id] = card
+
+            # Bind double click / click to maximize camera
+            for w in [cam_label, overlay]:
+                w.bind("<Double-Button-1>", lambda e, c=cam_id: self._toggle_camera_fullscreen(c))
+
+    def _apply_view_layout(self) -> None:
+        """Apply either grid layout or single full-screen camera layout."""
+        # Reset row/col configs
+        for r in range(10):
+            self._camera_frame.grid_rowconfigure(r, weight=0, uniform="")
+            self._camera_frame.grid_columnconfigure(r, weight=0, uniform="")
+
+        cam_ids = sorted(self._caps.keys())
+
+        if self._view_mode == "single" and self._selected_cam is not None:
+            # Single camera mode (Full View)
+            self._camera_frame.grid_rowconfigure(0, weight=1)
+            self._camera_frame.grid_columnconfigure(0, weight=1)
+
+            for cid, card in self._cam_cards.items():
+                if cid == self._selected_cam:
+                    card.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+                else:
+                    card.grid_remove()
+
+            # Update buttons
+            self._btn_grid.configure(bg="#1e293b", fg=TEXT_SECONDARY)
+            for cid in cam_ids:
+                btn = self._cam_view_btns.get(f"cam_{cid}")
+                if btn:
+                    if cid == self._selected_cam:
+                        btn.configure(bg=ACCENT_BLUE, fg="white")
+                    else:
+                        btn.configure(bg="#1e293b", fg=TEXT_SECONDARY)
+        else:
+            # Grid mode
+            cols = 2
+            n_rows = (len(cam_ids) + cols - 1) // cols
+
+            for r in range(n_rows):
+                self._camera_frame.grid_rowconfigure(r, weight=1, uniform="cam_row")
+            for c in range(cols):
+                self._camera_frame.grid_columnconfigure(c, weight=1, uniform="cam_col")
+
+            for idx, cid in enumerate(cam_ids):
+                row, col = divmod(idx, cols)
+                card = self._cam_cards[cid]
+                card.grid(row=row, column=col, padx=4, pady=4, sticky="nsew")
+
+            # Update buttons
+            self._btn_grid.configure(bg=ACCENT_BLUE, fg="white")
+            for cid in cam_ids:
+                btn = self._cam_view_btns.get(f"cam_{cid}")
+                if btn:
+                    btn.configure(bg="#1e293b", fg=TEXT_SECONDARY)
+
+        self._update_tracking_status_ui()
+        self._update_display()
+
+    def _set_view_grid(self) -> None:
+        """Switch to grid view of all cameras and stop auto-camera tracking."""
+        self._view_mode = "grid"
+        self._selected_cam = None
+        self._tracked_gid = None
+        self._apply_view_layout()
+        self._rebuild_cards()
+
+    def _set_view_camera(self, cam_id: int) -> None:
+        """Switch to full-screen view of a specific camera."""
+        self._view_mode = "single"
+        self._selected_cam = cam_id
+        self._tracked_gid = None
+        self._apply_view_layout()
+        self._rebuild_cards()
+
+    def _toggle_camera_fullscreen(self, cam_id: int) -> None:
+        """Toggle between full-screen camera and grid."""
+        if self._view_mode == "single" and self._selected_cam == cam_id:
+            self._set_view_grid()
+        else:
+            self._set_view_camera(cam_id)
+
+    # ── Auto-Follow Tracking Logic ────────────────────────────────────────────
+
+    def _get_person_current_camera(self, gid: int, frame_idx: int) -> Optional[int]:
+        """Return the camera ID where person is currently visible at frame_idx, or None."""
+        person = self.persons.get(gid, {})
+        for app in person.get("appearances", []):
+            if app["first_frame"] <= frame_idx <= app["last_frame"]:
+                return app["camera_id"]
+        return None
+
+    def _on_person_clicked(self, gid: int) -> None:
+        """Handle clicking a person ID card: toggle auto-follow tracking."""
+        if self._tracked_gid == gid:
+            # Deselect / stop tracking
+            self._stop_tracking()
+            return
+
+        self._tracked_gid = gid
+        cam_id = self._get_person_current_camera(gid, self._current_frame)
+
+        if cam_id is not None:
+            # Person is LIVE now: immediately full screen their camera
+            self._view_mode = "single"
+            self._selected_cam = cam_id
+        else:
+            # Person is not visible right now:
+            # If in grid, remain in grid (or keep view) until detected, with waiting status
+            # When detection happens during playback, it will auto-fullscreen
+            pass
+
+        self._apply_view_layout()
+        self._rebuild_cards()
+
+    def _stop_tracking(self) -> None:
+        """Stop auto-tracking person."""
+        self._tracked_gid = None
+        self._update_tracking_status_ui()
+        self._rebuild_cards()
+
+    def _update_tracking_status_ui(self) -> None:
+        """Update the auto-tracking status badge and buttons in the view switcher."""
+        if self._tracked_gid is not None:
+            gid = self._tracked_gid
+            cam_id = self._get_person_current_camera(gid, self._current_frame)
+            tag_name = "RANGA (ID:000)" if gid == 0 else f"ID:{gid:03d}"
+
+            if cam_id is not None:
+                text = f"🎯 Auto-Following {tag_name} on CAM {cam_id}"
+                bg = ACCENT_ORANGE if gid == 0 else BG_TRACKED
+                fg = "white" if gid == 0 else BORDER_TRACKED
+            else:
+                text = f"🎯 Auto-Following {tag_name} (Waiting for detection...)"
+                bg = "#334155"
+                fg = TEXT_SECONDARY
+
+            self._tracking_badge.configure(text=text, bg=bg, fg=fg)
+            self._tracking_badge.pack(side=tk.LEFT, padx=(0, 6))
+            self._tracking_stop_btn.pack(side=tk.LEFT)
+        else:
+            self._tracking_badge.pack_forget()
+            self._tracking_stop_btn.pack_forget()
 
     # ── Person cards ──────────────────────────────────────────────────────────
 
@@ -344,21 +578,36 @@ class ReviewUI:
             self._build_one_person_card(person)
 
     def _build_one_person_card(self, person: dict) -> None:
-        """Build a single person card with expandable timeline."""
+        """Build a single person card with expandable timeline & track toggle."""
         gid = person["global_id"]
         color_hex = person.get("color_hex", "#64748b")
         is_expanded = gid in self._expanded
+        is_tracked = (self._tracked_gid == gid)
+        is_ranger = (gid == 0)
 
         # Check if person is currently visible
-        is_active = self._is_person_visible(gid, self._current_frame)
-        bg = BG_ACTIVE if is_active else BG_CARD
-        border_color = ACCENT_GREEN if is_active else BORDER
+        active_cam = self._get_person_current_camera(gid, self._current_frame)
+        is_active = (active_cam is not None)
+
+        # Determine card border & background
+        if is_ranger and is_active:
+            border_color = ORANGE_FLASH_1 if self._flash_state else ORANGE_FLASH_2
+            bg = "#2a1205" if self._flash_state else "#1a0b03"
+        elif is_tracked:
+            border_color = BORDER_TRACKED
+            bg = BG_TRACKED
+        elif is_active:
+            border_color = ACCENT_GREEN
+            bg = BG_ACTIVE
+        else:
+            border_color = BORDER
+            bg = BG_CARD
 
         # Outer frame
         outer = tk.Frame(self._person_list_frame, bg=border_color, bd=0)
         outer.pack(fill=tk.X, padx=6, pady=3)
 
-        # Inner card (clickable)
+        # Inner card (clickable to track)
         card = tk.Frame(outer, bg=bg, bd=0, cursor="hand2")
         card.pack(fill=tk.X, padx=(3, 1), pady=1)
 
@@ -366,16 +615,17 @@ class ReviewUI:
         main_row = tk.Frame(card, bg=bg, cursor="hand2")
         main_row.pack(fill=tk.X, padx=8, pady=8)
 
-        # Expand indicator
+        # Expand arrow button
         expand_text = "▼" if is_expanded else "▶"
         expand_label = tk.Label(
             main_row, text=expand_text, bg=bg, fg=TEXT_MUTED,
             font=("Helvetica", 10), cursor="hand2"
         )
         expand_label.pack(side=tk.LEFT, padx=(0, 6))
+        expand_label.bind("<Button-1>", lambda e, g=gid: self._toggle_expand(g))
 
         # Thumbnail
-        thumb_frame = tk.Frame(main_row, bg=BORDER, width=40, height=52)
+        thumb_frame = tk.Frame(main_row, bg=border_color, width=40, height=52)
         thumb_frame.pack_propagate(False)
         thumb_frame.pack(side=tk.LEFT, padx=(0, 8))
 
@@ -396,39 +646,73 @@ class ReviewUI:
                      font=("Helvetica", 16)).pack(fill=tk.BOTH, expand=True)
 
         # Info column
-        info = tk.Frame(main_row, bg=bg)
+        info = tk.Frame(main_row, bg=bg, cursor="hand2")
         info.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Top: swatch + ID + LIVE badge + hit count
-        top = tk.Frame(info, bg=bg)
-        top.pack(fill=tk.X)
+        # Row 1: swatch + ID + Ranga tag + hit count
+        row1 = tk.Frame(info, bg=bg, cursor="hand2")
+        row1.pack(fill=tk.X)
 
-        swatch = tk.Frame(top, bg=color_hex, width=12, height=12)
-        swatch.pack(side=tk.LEFT, padx=(0, 6))
+        swatch = tk.Frame(row1, bg=color_hex, width=12, height=12)
+        swatch.pack(side=tk.LEFT, padx=(0, 6), pady=2)
         swatch.pack_propagate(False)
 
-        tk.Label(top, text=f"ID:{gid:03d}", bg=bg, fg=TEXT_PRIMARY,
-                 font=("Menlo", 13, "bold")).pack(side=tk.LEFT)
+        id_text = f"ID:{gid:03d}"
+        id_label = tk.Label(
+            row1, text=id_text, bg=bg,
+            fg="#fb923c" if is_ranger else TEXT_PRIMARY,
+            font=("Menlo", 12, "bold")
+        )
+        id_label.pack(side=tk.LEFT)
 
-        if is_active:
-            live_frame = tk.Frame(top, bg="#134e2e", bd=0)
-            live_frame.pack(side=tk.LEFT, padx=(8, 0))
-            tk.Label(live_frame, text=" ● LIVE ", bg="#134e2e", fg=ACCENT_GREEN,
-                     font=("Menlo", 8, "bold")).pack()
+        # Ranger special badge
+        if is_ranger:
+            r_bg = ORANGE_FLASH_1 if (is_active and self._flash_state) else "#7c2d12"
+            ranger_badge = tk.Label(
+                row1, text=" RANGA ", bg=r_bg, fg="white",
+                font=("Helvetica", 8, "bold"), padx=4, pady=1
+            )
+            ranger_badge.pack(side=tk.LEFT, padx=(6, 0))
 
-        tk.Label(top, text=f"×{person.get('total_detections', 0)}",
-                 bg=bg, fg=TEXT_MUTED, font=("Menlo", 11)).pack(side=tk.RIGHT)
+        tk.Label(
+            row1, text=f"×{person.get('total_detections', 0)}",
+            bg=bg, fg=TEXT_MUTED, font=("Menlo", 10)
+        ).pack(side=tk.RIGHT)
 
-        # Camera tags
-        cam_row = tk.Frame(info, bg=bg)
+        # Row 2: Status badges (LIVE / FOLLOWING) if active
+        if is_active or is_tracked:
+            row2 = tk.Frame(info, bg=bg, cursor="hand2")
+            row2.pack(fill=tk.X, pady=(2, 0))
+
+            if is_active:
+                live_frame = tk.Frame(row2, bg="#134e2e", bd=0)
+                live_frame.pack(side=tk.LEFT, padx=(0, 4))
+                tk.Label(
+                    live_frame, text=f" ● LIVE (Cam {active_cam}) ",
+                    bg="#134e2e", fg=ACCENT_GREEN,
+                    font=("Menlo", 8, "bold"), padx=2, pady=1
+                ).pack()
+
+            if is_tracked:
+                track_badge = tk.Label(
+                    row2, text=" 🎯 FOLLOWING ",
+                    bg="#312e81", fg=BORDER_TRACKED,
+                    font=("Menlo", 8, "bold"), padx=4, pady=1
+                )
+                track_badge.pack(side=tk.LEFT)
+
+        # Row 3: Camera tags
+        cam_row = tk.Frame(info, bg=bg, cursor="hand2")
         cam_row.pack(fill=tk.X, pady=(3, 0))
         for c in person.get("cameras_seen", []):
-            tk.Label(cam_row, text=f" Cam {c} ", bg="#1e293b", fg=TEXT_MUTED,
-                     font=("Menlo", 9, "bold"), padx=2).pack(side=tk.LEFT, padx=(0, 4))
+            tk.Label(
+                cam_row, text=f" Cam {c} ", bg="#1e293b", fg=TEXT_MUTED,
+                font=("Menlo", 8, "bold"), padx=3, pady=1
+            ).pack(side=tk.LEFT, padx=(0, 4))
 
-        # Make the whole card clickable (toggle expand)
-        for widget in [card, main_row, expand_label, info, top, cam_row]:
-            widget.bind("<Button-1>", lambda e, g=gid: self._toggle_expand(g))
+        # Make card elements click to toggle tracking
+        for widget in [card, main_row, thumb_frame, info, row1, id_label, cam_row]:
+            widget.bind("<Button-1>", lambda e, g=gid: self._on_person_clicked(g))
 
         # ── Expanded timeline ─────────────────────────────────────────────────
         if is_expanded:
@@ -441,7 +725,6 @@ class ReviewUI:
                          bg=BG_EXPANDED, fg=TEXT_MUTED,
                          font=("Helvetica", 10), pady=8).pack(anchor="w")
             else:
-                # Group appearances by camera
                 for i, app in enumerate(appearances):
                     self._build_appearance_row(timeline, app, gid, i)
 
@@ -473,18 +756,16 @@ class ReviewUI:
                           font=("Menlo", 9, "bold"), cursor="hand2", padx=4)
         go_btn.pack(side=tk.RIGHT, padx=4)
 
-        # Click to seek
-        seek_frame = first_frame
-        for widget in [row, go_btn]:
-            widget.bind("<Button-1>", lambda e, f=seek_frame: self._seek_to_frame(f))
+        # Click to seek & auto-follow on that camera
+        def _seek_and_follow(e=None, f=first_frame, c=cam_id, g=gid):
+            self._tracked_gid = g
+            self._view_mode = "single"
+            self._selected_cam = c
+            self._seek_to_frame(f)
+            self._apply_view_layout()
 
-    def _is_person_visible(self, gid: int, frame_idx: int) -> bool:
-        """Check if a person is visible at the current frame based on their appearances."""
-        person = self.persons.get(gid, {})
-        for app in person.get("appearances", []):
-            if app["first_frame"] <= frame_idx <= app["last_frame"]:
-                return True
-        return False
+        for widget in [row, go_btn]:
+            widget.bind("<Button-1>", _seek_and_follow)
 
     def _toggle_expand(self, gid: int) -> None:
         """Toggle expand/collapse for a person card."""
@@ -495,11 +776,12 @@ class ReviewUI:
         self._rebuild_cards()
 
     def _rebuild_cards(self) -> None:
-        """Rebuild all person cards (preserving expand state)."""
+        """Rebuild all person cards (preserving scroll position)."""
         scroll_pos = self._canvas.yview()
         self._build_person_cards()
         self.root.update_idletasks()
-        self._canvas.yview_moveto(scroll_pos[0])
+        if scroll_pos:
+            self._canvas.yview_moveto(scroll_pos[0])
 
     # ── Playback controls ─────────────────────────────────────────────────────
 
@@ -530,14 +812,83 @@ class ReviewUI:
         """Seek all cameras to a specific frame."""
         self._current_frame = max(0, min(frame_idx, self._max_frame))
         self._seek_var.set(self._current_frame)
+        self._handle_auto_tracking()
         self._update_display()
         self._rebuild_cards()
 
-    # ── Display update ────────────────────────────────────────────────────────
+    # ── Display update & Auto-following ───────────────────────────────────────
+
+    def _handle_auto_tracking(self) -> None:
+        """If auto-following a person, dynamically switch camera to where they appear."""
+        if self._tracked_gid is None:
+            return
+
+        cur_cam = self._get_person_current_camera(self._tracked_gid, self._current_frame)
+        if cur_cam is not None:
+            # Person is detected on cur_cam! Full-screen that camera
+            if self._view_mode != "single" or self._selected_cam != cur_cam:
+                self._view_mode = "single"
+                self._selected_cam = cur_cam
+                self._apply_view_layout()
+
+    def _update_ranger_alert(self) -> None:
+        """Update Ranger (ID:000) flashing orange title and banner."""
+        ranger_cam = self._get_person_current_camera(0, self._current_frame)
+        is_ranger_live = (ranger_cam is not None)
+
+        if is_ranger_live:
+            # Show banner
+            flash_bg = ORANGE_FLASH_1 if self._flash_state else ORANGE_FLASH_2
+            flash_fg = "white" if self._flash_state else "#fed7aa"
+
+            self._ranger_banner.configure(bg=flash_bg)
+            self._ranger_banner_label.configure(
+                text=f"🚨  RANGA DETECTED  —  PERSON ID:000 IS LIVE ON CAM {ranger_cam}  🚨",
+                bg=flash_bg, fg=flash_fg
+            )
+            if not self._ranger_banner.winfo_ismapped():
+                self._ranger_banner.pack(fill=tk.X, side=tk.TOP, before=self._content)
+
+            # Header badge
+            self._ranger_header_badge.configure(
+                text=f" ⚠️ RANGA DETECTED (CAM {ranger_cam}) ",
+                bg=flash_bg, fg=flash_fg
+            )
+            self._ranger_header_badge.pack(side=tk.LEFT, padx=12)
+
+            # Camera overlay alert
+            for cid, overlay in self._cam_overlays.items():
+                if cid == ranger_cam:
+                    overlay.configure(
+                        text=f"  ● CAM {cid} — ⚠️ RANGA DETECTED (ID:000)  ",
+                        bg=flash_bg, fg="white"
+                    )
+                else:
+                    overlay.configure(
+                        text=f"  ● CAM {cid}  ",
+                        bg="#000000", fg="white"
+                    )
+        else:
+            # Hide banner and header badge
+            if self._ranger_banner.winfo_ismapped():
+                self._ranger_banner.pack_forget()
+            self._ranger_header_badge.pack_forget()
+
+            for cid, overlay in self._cam_overlays.items():
+                overlay.configure(
+                    text=f"  ● CAM {cid}  ",
+                    bg="#000000", fg="white"
+                )
 
     def _update_display(self) -> None:
         """Update camera feeds and UI for the current frame."""
-        for cam_id, cap in self._caps.items():
+        # Check which cameras need rendering
+        if self._view_mode == "single" and self._selected_cam is not None:
+            cams_to_render = [self._selected_cam]
+        else:
+            cams_to_render = sorted(self._caps.keys())
+
+        for cam_id in cams_to_render:
             frame = self._read_frame(cam_id, self._current_frame)
             if frame is None:
                 continue
@@ -549,7 +900,10 @@ class ReviewUI:
             lw = label.winfo_width()
             lh = label.winfo_height()
             if lw < 10 or lh < 10:
-                lw, lh = 540, 304
+                if self._view_mode == "single":
+                    lw, lh = 1000, 600
+                else:
+                    lw, lh = 540, 304
 
             fh, fw = frame.shape[:2]
             scale = min(lw / fw, lh / fh)
@@ -570,6 +924,10 @@ class ReviewUI:
         total_ts = self._frame_to_timestamp(self._max_frame)
         self._time_label.configure(text=f"{current_ts} / {total_ts}")
 
+        # Update Ranger alert visuals
+        self._update_ranger_alert()
+        self._update_tracking_status_ui()
+
     def _frame_to_timestamp(self, frame: int) -> str:
         if self._playback_fps <= 0:
             return "0:00"
@@ -584,6 +942,11 @@ class ReviewUI:
 
     def _tick(self) -> None:
         """Main update loop, called from tkinter's after()."""
+        # Update flash state every ~300ms for Ranger alert animation
+        self._flash_tick = (self._flash_tick + 1) % 8
+        if self._flash_tick == 0:
+            self._flash_state = not self._flash_state
+
         if self._playing:
             next_frame = self._current_frame + 1
             if next_frame > self._max_frame:
@@ -592,11 +955,16 @@ class ReviewUI:
             else:
                 self._current_frame = next_frame
                 self._seek_var.set(self._current_frame)
+                self._handle_auto_tracking()
                 self._update_display()
 
-                # Rebuild person cards every 15 frames (for active highlighting)
+                # Rebuild person cards every 15 frames (for active highlight synchronization)
                 if self._current_frame % 15 == 0:
                     self._rebuild_cards()
+        else:
+            # If paused, still update flashing alert if Ranger is visible
+            if self._get_person_current_camera(0, self._current_frame) is not None:
+                self._update_ranger_alert()
 
         # Schedule at playback FPS
         delay = max(10, int(1000 / self._playback_fps))
