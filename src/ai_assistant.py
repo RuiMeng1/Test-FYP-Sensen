@@ -3,7 +3,7 @@ ai_assistant.py — OpenAI-powered Video Intelligence & Query Engine for Sensen.
 
 Combines:
   1. Spatiotemporal tracking log (cameras, appearances, timestamps, frequencies).
-  2. Person thumbnail visual profiling via GPT-4o-mini Vision with local caching.
+  2. Multi-thumbnail visual profiling via GPT-4o-mini Vision with local caching.
   3. Interactive natural language chat with timestamp citation links: [Cam X @ M:SS].
 """
 
@@ -27,7 +27,7 @@ dotenv.load_dotenv(override=True)
 
 # Increment when the visual-profiling prompt or evidence policy changes. Older
 # cached descriptions are ignored so past hallucinations do not live forever.
-PROFILE_VERSION = 2
+PROFILE_VERSION = 3
 
 
 class AIAssistant:
@@ -35,6 +35,12 @@ class AIAssistant:
     Intelligent assistant capable of answering natural language queries about
     multi-camera tracking footage using OpenAI models (GPT-4o-mini).
     """
+
+    VISUAL_KEYWORDS = (
+        "cloth", "wear", "shirt", "pant", "jacket", "hoodie", "hat", "cap",
+        "backpack", "bag", "color", "red", "blue", "green", "black", "white",
+        "yellow", "dress", "look like", "appearance", "describe",
+    )
 
     def __init__(self, tracking_data: dict, output_dir: Path):
         self.tracking_data = tracking_data
@@ -72,15 +78,44 @@ class AIAssistant:
     # ── Visual Profiling Cache ────────────────────────────────────────────────
 
     @staticmethod
-    def _thumbnail_hash(thumbnail_b64: Optional[str]) -> Optional[str]:
-        """Return a stable fingerprint for the exact thumbnail sent to vision."""
-        if not thumbnail_b64:
+    def _get_thumbnails(person_info: Optional[dict]) -> List[str]:
+        """Return up to three valid, unique thumbnails with legacy fallback."""
+        if not person_info:
+            return []
+
+        candidates = person_info.get("thumbnails_b64")
+        if not isinstance(candidates, list) or not candidates:
+            candidates = [person_info.get("thumbnail_b64")]
+
+        thumbnails: List[str] = []
+        seen = set()
+        for candidate in candidates:
+            if not isinstance(candidate, str) or not candidate or candidate in seen:
+                continue
+            try:
+                base64.b64decode(candidate, validate=True)
+            except (ValueError, TypeError):
+                continue
+            seen.add(candidate)
+            thumbnails.append(candidate)
+            if len(thumbnails) == 3:
+                break
+        return thumbnails
+
+    @staticmethod
+    def _thumbnail_set_hash(thumbnails_b64: List[str]) -> Optional[str]:
+        """Fingerprint the ordered set of images used to produce a profile."""
+        if not thumbnails_b64:
             return None
-        try:
-            image_bytes = base64.b64decode(thumbnail_b64, validate=True)
-        except (ValueError, TypeError):
-            return None
-        return hashlib.sha256(image_bytes).hexdigest()
+        digest = hashlib.sha256()
+        for thumbnail_b64 in thumbnails_b64:
+            try:
+                image_bytes = base64.b64decode(thumbnail_b64, validate=True)
+            except (ValueError, TypeError):
+                return None
+            digest.update(len(image_bytes).to_bytes(8, "big"))
+            digest.update(image_bytes)
+        return digest.hexdigest()
 
     def _load_profiles(self) -> Dict[str, dict]:
         """Load only profiles that match the latest tracking-log thumbnails."""
@@ -93,9 +128,8 @@ class AIAssistant:
                 for gid, profile in profiles.items():
                     gid_str = str(gid)
                     person = current_persons.get(gid_str) or current_persons.get(gid)
-                    current_hash = self._thumbnail_hash(
-                        person.get("thumbnail_b64") if person else None
-                    )
+                    current_thumbnails = self._get_thumbnails(person)
+                    current_hash = self._thumbnail_set_hash(current_thumbnails)
                     if (
                         profile.get("profile_version") == PROFILE_VERSION
                         and current_hash is not None
@@ -119,7 +153,7 @@ class AIAssistant:
     def profile_person(self, gid: int, client=None) -> Optional[dict]:
         """
         Use GPT-4o-mini Vision to describe clothing, colors, and accessories
-        from the person's thumbnail crop. Results are cached locally.
+        from up to three person crops. Results are cached locally.
         """
         gid_str = str(gid)
         persons = self.tracking_data.get("persons", {})
@@ -128,8 +162,8 @@ class AIAssistant:
             self._profiles.pop(gid_str, None)
             return None
 
-        thumb_b64 = person_info.get("thumbnail_b64")
-        thumbnail_hash = self._thumbnail_hash(thumb_b64)
+        thumbnails_b64 = self._get_thumbnails(person_info)
+        thumbnail_hash = self._thumbnail_set_hash(thumbnails_b64)
         if thumbnail_hash is None:
             self._profiles.pop(gid_str, None)
             return None
@@ -146,31 +180,36 @@ class AIAssistant:
             client = self._get_client()
 
         prompt = (
-            "Describe only details that are clearly visible in this surveillance crop. "
+            "These are up to three surveillance crops of the same tracked person, possibly "
+            "from different cameras and viewpoints. Compare all supplied crops and produce one "
+            "combined description. Describe only details that are clearly visible and consistent. "
             "Do not infer hidden clothing, bags, or accessories from shadows, folds, pose, "
             "or what a person might commonly carry. If a region is unclear or outside the "
-            "crop, say that it is unclear. Report upper clothing, lower clothing, footwear, "
+            "crops, say that it is unclear. If the crops disagree, state the uncertainty rather "
+            "than choosing one. Report upper clothing, lower clothing, footwear, "
             "hair, and only accessories supported by unambiguous visible evidence. Explicitly "
-            "say 'no clearly visible bag or backpack' when none is visible. Keep the result to "
+            "say 'no clearly visible bag or backpack' when none is visible in any crop. Keep the result to "
             "one or two factual sentences and avoid guessing."
         )
 
         try:
+            content: List[dict] = [{"type": "text", "text": prompt}]
+            content.extend(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{thumbnail_b64}",
+                        "detail": "high",
+                    },
+                }
+                for thumbnail_b64 in thumbnails_b64
+            )
             response = client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {
                         "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{thumb_b64}",
-                                    "detail": "high"
-                                }
-                            }
-                        ]
+                        "content": content,
                     }
                 ],
                 max_tokens=150,
@@ -183,6 +222,7 @@ class AIAssistant:
                 "profiled_at": datetime.now().isoformat(),
                 "profile_version": PROFILE_VERSION,
                 "thumbnail_hash": thumbnail_hash,
+                "thumbnail_count": len(thumbnails_b64),
             }
             self._profiles[gid_str] = profile
             self._save_profiles()
@@ -211,6 +251,46 @@ class AIAssistant:
                     progress_cb(count, total)
             except Exception as e:
                 print(f"[AIAssistant] Error profiling {gid_str}: {e}")
+
+    @classmethod
+    def is_visual_query(cls, user_query: str) -> bool:
+        """Return whether answering the query requires visual profile evidence."""
+        query = user_query.lower()
+        return any(keyword in query for keyword in cls.VISUAL_KEYWORDS)
+
+    def get_visual_evidence(self, user_query: str, reply: str) -> List[dict]:
+        """Return the exact person crops supporting a visual answer."""
+        if not self.is_visual_query(user_query):
+            return []
+
+        requested_ids = {
+            int(match.group(1))
+            for match in re.finditer(
+                r"(?:person|id)\s*:?[\s-]*0*(\d+)", user_query, re.IGNORECASE
+            )
+        }
+        evidence_ids = sorted(requested_ids) if requested_ids else parse_person_ids(reply)
+        persons = self.tracking_data.get("persons", {})
+        evidence: List[dict] = []
+        for gid in evidence_ids[:3]:
+            gid_str = str(gid)
+            person = persons.get(gid_str) or persons.get(gid)
+            profile = self._profiles.get(gid_str)
+            thumbnails = self._get_thumbnails(person)
+            if not profile or not thumbnails:
+                continue
+            evidence.append({
+                "global_id": gid,
+                "thumbnails_b64": thumbnails,
+                "description": profile.get("description", ""),
+                "profiled_at": profile.get("profiled_at"),
+            })
+        return evidence
+
+    def get_cached_profile(self, gid: int) -> Optional[dict]:
+        """Return a copy of the current-image visual profile, if available."""
+        profile = self._profiles.get(str(gid))
+        return dict(profile) if profile else None
 
     # ── Knowledge Representation ──────────────────────────────────────────────
 
@@ -303,13 +383,7 @@ class AIAssistant:
         client = self._get_client()
 
         # Check if user query asks about appearance/clothing/accessories
-        visual_keywords = [
-            "cloth", "wear", "shirt", "pant", "jacket", "hoodie", "hat", "cap",
-            "backpack", "bag", "color", "red", "blue", "green", "black", "white",
-            "yellow", "dress", "look like", "appearance", "describe"
-        ]
-        q_lower = user_query.lower()
-        if any(w in q_lower for w in visual_keywords):
+        if self.is_visual_query(user_query):
             # Profile only explicitly requested IDs. Reverse appearance searches
             # still need profiles for everyone, but "what is ID 0 wearing?" does not.
             persons = self.tracking_data.get("persons", {})
