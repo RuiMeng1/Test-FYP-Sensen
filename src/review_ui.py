@@ -920,3 +920,441 @@ class ReviewUI:
             for frame_str, det_list in frames_map.items():
                 for det in det_list:
                     if det.get("gid") == source_gid or det.get("global_id") == source_gid:
+                        det["gid"] = target_gid
+                        det["global_id"] = target_gid
+
+        # 6. Remove source person
+        del self.persons[source_gid]
+        if str(source_gid) in self.tracking_data.get("persons", {}):
+            del self.tracking_data["persons"][str(source_gid)]
+
+        # 7. Update tracking_data dictionary
+        self.tracking_data["persons"][str(target_gid)] = target_person
+        self.tracking_data["detections"] = self.detections
+
+        # 8. Save updated log to JSON file
+        log_path = self.output_dir / "tracking_log.json"
+        try:
+            with open(log_path, "w", encoding="utf-8") as f:
+                json.dump(self.tracking_data, f, indent=2)
+            print(f"[ReviewUI] ✓ Saved updated tracking log to {log_path}")
+        except Exception as e:
+            print(f"[ReviewUI] ⚠️ Error saving tracking log: {e}")
+
+        # Reset merge state
+        self._merge_source_gid = None
+
+        # Rebuild UI elements
+        self._rebuild_gallery_grid()
+        self._build_person_cards()
+        self._status_label.configure(
+            text=f"  {len(self.persons)} unique persons  •  {self._n_cameras} cameras  •  {self._max_frame + 1} frames"
+        )
+        self._update_display()
+
+        # Feedback Toast
+        messagebox.showinfo(
+            "Merge Successful",
+            f"✓ Successfully merged Person ID:{source_gid:03d} into ID:{target_gid:03d}!\nUpdated data saved to tracking_log.json.",
+            parent=self.root
+        )
+
+    def _jump_to_person_video(self, gid: int) -> None:
+        """Jump from People Gallery directly to the first appearance in the Video view."""
+        person = self.persons.get(gid, {})
+        apps = person.get("appearances", [])
+        if apps:
+            first_app = apps[0]
+            first_frame = first_app.get("first_frame", 0)
+            cam_id = first_app.get("camera_id")
+            self._seek_to_frame(first_frame)
+            if cam_id is not None:
+                self._view_mode = "single"
+                self._selected_cam = cam_id
+                self._tracked_gid = gid
+        self._show_video_section()
+        self._apply_view_layout()
+
+    # ── View Layout & Playback Controls ────────────────────────────────────────
+
+    def _set_view_grid(self) -> None:
+        self._view_mode = "grid"
+        self._selected_cam = None
+        self._tracked_gid = None
+        self._apply_view_layout()
+        self._rebuild_cards()
+
+    def _set_view_camera(self, cam_id: int) -> None:
+        self._view_mode = "single"
+        self._selected_cam = cam_id
+        self._tracked_gid = None
+        self._apply_view_layout()
+        self._rebuild_cards()
+
+    def _toggle_camera_fullscreen(self, cam_id: int) -> None:
+        if self._view_mode == "single" and self._selected_cam == cam_id:
+            self._set_view_grid()
+        else:
+            self._set_view_camera(cam_id)
+
+    def _get_person_current_camera(self, gid: int, frame_idx: int) -> Optional[int]:
+        person = self.persons.get(gid, {})
+        for app in person.get("appearances", []):
+            if app["first_frame"] <= frame_idx <= app["last_frame"]:
+                return app["camera_id"]
+        return None
+
+    def _on_person_clicked(self, gid: int) -> None:
+        if self._tracked_gid == gid:
+            self._stop_tracking()
+            return
+
+        self._tracked_gid = gid
+        cam_id = self._get_person_current_camera(gid, self._current_frame)
+        if cam_id is not None:
+            self._view_mode = "single"
+            self._selected_cam = cam_id
+
+        self._apply_view_layout()
+        self._rebuild_cards()
+
+    def _stop_tracking(self) -> None:
+        self._tracked_gid = None
+        self._update_tracking_status_ui()
+        self._rebuild_cards()
+
+    def _update_tracking_status_ui(self) -> None:
+        if self._tracked_gid is not None:
+            gid = self._tracked_gid
+            cam_id = self._get_person_current_camera(gid, self._current_frame)
+            if cam_id is not None:
+                text = f"🎯 Auto-Following ID:{gid:03d} on CAM {cam_id}"
+                bg = BG_TRACKED
+                fg = BORDER_TRACKED
+            else:
+                text = f"🎯 Auto-Following ID:{gid:03d} (Waiting for detection...)"
+                bg = "#334155"
+                fg = TEXT_SECONDARY
+
+            self._tracking_badge.configure(text=text, bg=bg, fg=fg)
+            self._tracking_badge.pack(side=tk.LEFT, padx=(0, 6))
+            self._tracking_stop_btn.pack(side=tk.LEFT)
+        else:
+            self._tracking_badge.pack_forget()
+            self._tracking_stop_btn.pack_forget()
+
+    # ── Sidebar Person Cards ──────────────────────────────────────────────────
+
+    def _build_person_cards(self) -> None:
+        for widget in self._person_list_frame.winfo_children():
+            widget.destroy()
+        self._thumb_refs.clear()
+
+        for gid in sorted(self.persons.keys()):
+            person = self.persons[gid]
+            self._build_one_person_card(person)
+
+    def _build_one_person_card(self, person: dict) -> None:
+        gid = person["global_id"]
+        color_hex = person.get("color_hex", "#64748b")
+        is_expanded = gid in self._expanded
+        is_tracked = (self._tracked_gid == gid)
+
+        active_cam = self._get_person_current_camera(gid, self._current_frame)
+        is_active = (active_cam is not None)
+
+        if is_tracked:
+            border_color = BORDER_TRACKED
+            bg = BG_TRACKED
+        elif is_active:
+            border_color = ACCENT_GREEN
+            bg = BG_ACTIVE
+        else:
+            border_color = BORDER
+            bg = BG_CARD
+
+        outer = tk.Frame(self._person_list_frame, bg=border_color, bd=0)
+        outer.pack(fill=tk.X, padx=6, pady=3)
+
+        card = tk.Frame(outer, bg=bg, bd=0, cursor="hand2")
+        card.pack(fill=tk.X, padx=(3, 1), pady=1)
+
+        main_row = tk.Frame(card, bg=bg, cursor="hand2")
+        main_row.pack(fill=tk.X, padx=8, pady=8)
+
+        expand_text = "▼" if is_expanded else "▶"
+        expand_label = tk.Label(
+            main_row, text=expand_text, bg=bg, fg=TEXT_MUTED,
+            font=("Helvetica", 10), cursor="hand2"
+        )
+        expand_label.pack(side=tk.LEFT, padx=(0, 6))
+        expand_label.bind("<Button-1>", lambda e, g=gid: self._toggle_expand(g))
+
+        thumb_frame = tk.Frame(main_row, bg=border_color, width=40, height=52)
+        thumb_frame.pack_propagate(False)
+        thumb_frame.pack(side=tk.LEFT, padx=(0, 8))
+
+        if person.get("thumbnail_b64"):
+            try:
+                raw = base64.b64decode(person["thumbnail_b64"])
+                pil_img = Image.open(io.BytesIO(raw))
+                pil_img = pil_img.resize((38, 50), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(pil_img)
+                thumb_label = tk.Label(thumb_frame, image=photo, bg=BORDER, bd=0)
+                thumb_label.pack(fill=tk.BOTH, expand=True)
+                self._thumb_refs[gid] = photo
+            except Exception:
+                tk.Label(thumb_frame, text="👤", bg=BG_CARD, fg=TEXT_MUTED,
+                         font=("Helvetica", 16)).pack(fill=tk.BOTH, expand=True)
+        else:
+            tk.Label(thumb_frame, text="👤", bg=BG_CARD, fg=TEXT_MUTED,
+                     font=("Helvetica", 16)).pack(fill=tk.BOTH, expand=True)
+
+        info = tk.Frame(main_row, bg=bg, cursor="hand2")
+        info.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        row1 = tk.Frame(info, bg=bg, cursor="hand2")
+        row1.pack(fill=tk.X)
+
+        swatch = tk.Frame(row1, bg=color_hex, width=12, height=12)
+        swatch.pack(side=tk.LEFT, padx=(0, 6), pady=2)
+        swatch.pack_propagate(False)
+
+        id_text = f"ID:{gid:03d}"
+        id_label = tk.Label(
+            row1, text=id_text, bg=bg, fg=TEXT_PRIMARY, font=("Menlo", 12, "bold")
+        )
+        id_label.pack(side=tk.LEFT)
+
+        tk.Label(
+            row1, text=f"×{person.get('total_detections', 0)}",
+            bg=bg, fg=TEXT_MUTED, font=("Menlo", 10)
+        ).pack(side=tk.RIGHT)
+
+        if is_active or is_tracked:
+            row2 = tk.Frame(info, bg=bg, cursor="hand2")
+            row2.pack(fill=tk.X, pady=(2, 0))
+
+            if is_active:
+                live_frame = tk.Frame(row2, bg="#134e2e", bd=0)
+                live_frame.pack(side=tk.LEFT, padx=(0, 4))
+                tk.Label(
+                    live_frame, text=f" ● LIVE (Cam {active_cam}) ",
+                    bg="#134e2e", fg=ACCENT_GREEN,
+                    font=("Menlo", 8, "bold"), padx=2, pady=1
+                ).pack()
+
+            if is_tracked:
+                track_badge = tk.Label(
+                    row2, text=" 🎯 FOLLOWING ",
+                    bg="#312e81", fg=BORDER_TRACKED,
+                    font=("Menlo", 8, "bold"), padx=4, pady=1
+                )
+                track_badge.pack(side=tk.LEFT)
+
+        cam_row = tk.Frame(info, bg=bg, cursor="hand2")
+        cam_row.pack(fill=tk.X, pady=(3, 0))
+        for c in person.get("cameras_seen", []):
+            tk.Label(
+                cam_row, text=f" Cam {c} ", bg="#1e293b", fg=TEXT_MUTED,
+                font=("Menlo", 8, "bold"), padx=3, pady=1
+            ).pack(side=tk.LEFT, padx=(0, 4))
+
+        for widget in [card, main_row, thumb_frame, info, row1, id_label, cam_row]:
+            widget.bind("<Button-1>", lambda e, g=gid: self._on_person_clicked(g))
+
+        if is_expanded:
+            timeline = tk.Frame(outer, bg=BG_EXPANDED, bd=0)
+            timeline.pack(fill=tk.X, padx=(3, 1), pady=(0, 1))
+
+            appearances = person.get("appearances", [])
+            if not appearances:
+                tk.Label(timeline, text="  No appearances recorded",
+                         bg=BG_EXPANDED, fg=TEXT_MUTED,
+                         font=("Helvetica", 10), pady=8).pack(anchor="w")
+            else:
+                for i, app in enumerate(appearances):
+                    self._build_appearance_row(timeline, app, gid, i)
+
+    def _build_appearance_row(self, parent: tk.Frame, app: dict, gid: int, idx: int) -> None:
+        row = tk.Frame(parent, bg=BG_EXPANDED, cursor="hand2")
+        row.pack(fill=tk.X, padx=12, pady=2)
+
+        cam_id = app["camera_id"]
+        first_ts = app.get("first_timestamp", "?")
+        last_ts = app.get("last_timestamp", "?")
+        duration = app.get("duration_seconds", 0)
+        first_frame = app.get("first_frame", 0)
+
+        tk.Label(row, text=f"📷 Cam {cam_id}", bg=BG_EXPANDED, fg=ACCENT_BLUE,
+                 font=("Menlo", 10, "bold")).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Label(row, text=f"{first_ts} – {last_ts}", bg=BG_EXPANDED, fg=TEXT_SECONDARY,
+                 font=("Menlo", 10)).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Label(row, text=f"({duration}s)", bg=BG_EXPANDED, fg=TEXT_MUTED,
+                 font=("Menlo", 9)).pack(side=tk.LEFT)
+
+        go_btn = tk.Label(row, text=" ▶ GO ", bg="#1e293b", fg=ACCENT_YELLOW,
+                          font=("Menlo", 9, "bold"), cursor="hand2", padx=4)
+        go_btn.pack(side=tk.RIGHT, padx=4)
+
+        def _seek_and_follow(e=None, f=first_frame, c=cam_id, g=gid):
+            self._tracked_gid = g
+            self._view_mode = "single"
+            self._selected_cam = c
+            self._seek_to_frame(f)
+            self._apply_view_layout()
+
+        for widget in [row, go_btn]:
+            widget.bind("<Button-1>", _seek_and_follow)
+
+    def _toggle_expand(self, gid: int) -> None:
+        if gid in self._expanded:
+            self._expanded.remove(gid)
+        else:
+            self._expanded.add(gid)
+        self._build_person_cards()
+
+    def _rebuild_cards(self) -> None:
+        self._build_person_cards()
+
+    # ── Playback Controls ─────────────────────────────────────────────────────
+
+    def _toggle_play(self) -> None:
+        self._playing = not self._playing
+        self._btn_play.configure(text=" ⏸ " if self._playing else " ▶ ")
+
+    def _step_back(self) -> None:
+        self._playing = False
+        self._btn_play.configure(text=" ▶ ")
+        self._seek_to_frame(max(0, self._current_frame - 1))
+
+    def _step_forward(self) -> None:
+        self._playing = False
+        self._btn_play.configure(text=" ▶ ")
+        self._seek_to_frame(min(self._max_frame, self._current_frame + 1))
+
+    def _on_seek(self, value: str) -> None:
+        self._seek_to_frame(int(value))
+
+    def _seek_to_frame(self, frame_idx: int) -> None:
+        self._current_frame = frame_idx
+        self._seek_var.set(frame_idx)
+        self._handle_auto_tracking()
+        self._update_display()
+
+    def _handle_auto_tracking(self) -> None:
+        if self._tracked_gid is not None:
+            cam_id = self._get_person_current_camera(self._tracked_gid, self._current_frame)
+            if cam_id is not None:
+                if self._selected_cam != cam_id or self._view_mode != "single":
+                    self._view_mode = "single"
+                    self._selected_cam = cam_id
+                    self._apply_view_layout()
+
+    def _update_display(self) -> None:
+        """Render current video frames to the camera widgets."""
+        if self._main_section != "video":
+            return
+
+        cams_to_render = (
+            [self._selected_cam]
+            if self._view_mode == "single" and self._selected_cam is not None
+            else list(self._caps.keys())
+        )
+
+        for cam_id in cams_to_render:
+            label = self._cam_labels.get(cam_id)
+            if label is None:
+                continue
+
+            frame = self._read_frame(cam_id, self._current_frame)
+            if frame is None:
+                continue
+
+            w = max(label.winfo_width(), 100)
+            h = max(label.winfo_height(), 100)
+
+            fh, fw = frame.shape[:2]
+            scale = min(w / fw, h / fh)
+            nw = max(1, int(fw * scale))
+            nh = max(1, int(fh * scale))
+
+            resized = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
+            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(rgb)
+            photo = ImageTk.PhotoImage(image=img)
+
+            label.configure(image=photo)
+            label.image = photo
+            self._photo_refs[cam_id] = photo
+
+        self._frame_label.configure(text=f"Frame: {self._current_frame}")
+        current_ts = self._frame_to_timestamp(self._current_frame)
+        total_ts = self._frame_to_timestamp(self._max_frame)
+        self._time_label.configure(text=f"{current_ts} / {total_ts}")
+        self._update_tracking_status_ui()
+
+    def _frame_to_timestamp(self, frame: int) -> str:
+        if self._playback_fps <= 0:
+            return "0:00"
+        total = int(frame / self._playback_fps)
+        m, s = divmod(total, 60)
+        return f"{m}:{s:02d}"
+
+    def _on_mousewheel(self, event):
+        self._canvas.yview_scroll(-1 * (event.delta // 120 or event.delta), "units")
+
+    # ── Main loop ─────────────────────────────────────────────────────────────
+
+    def _tick(self) -> None:
+        """Main update loop."""
+        if self._playing:
+            next_frame = self._current_frame + 1
+            if next_frame > self._max_frame:
+                self._playing = False
+                self._btn_play.configure(text=" ▶ ")
+            else:
+                self._current_frame = next_frame
+                self._seek_var.set(self._current_frame)
+                self._handle_auto_tracking()
+                self._update_display()
+
+                if self._current_frame % 15 == 0:
+                    self._rebuild_cards()
+
+        delay = max(10, int(1000 / self._playback_fps))
+        self.root.after(delay, self._tick)
+
+    def run(self) -> None:
+        """Start the review UI."""
+        print(f"[ReviewUI] ✦ Review dashboard opened  ({len(self.persons)} persons, {self._n_cameras} cameras)")
+        self._update_display()
+        self.root.after(100, self._tick)
+        self.root.mainloop()
+
+        for cap in self._caps.values():
+            cap.release()
+        for cap in self._raw_caps.values():
+            cap.release()
+
+    def destroy(self) -> None:
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
+
+if __name__ == "__main__":
+    from src.config import OUTPUT_DIR
+    from src.tracking_log import TrackingLog
+
+    log_path = OUTPUT_DIR / "tracking_log.json"
+    if not log_path.exists():
+        print(f"[ReviewUI] No tracking log found at {log_path}")
+        print(f"           Run pipeline first: python -m src.main")
+        exit(1)
+
+    print(f"[ReviewUI] Loading tracking log from {log_path} …")
+    tracking_data = TrackingLog.load(str(log_path))
+    ui = ReviewUI(tracking_data=tracking_data, output_dir=str(OUTPUT_DIR))
+    ui.run()
