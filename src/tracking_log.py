@@ -227,6 +227,7 @@ class TrackingLog:
                     "total_detections": gallery_entry["hit_count"] if gallery_entry else total_detections,
                     "cameras_seen": gallery_entry["cameras_seen"] if gallery_entry else sorted(set(a.camera_id for a in appearances)),
                     "appearances": [a.to_dict() for a in appearances],
+                    "visual_attributes": None,
                 }
 
             # Convert detections dictionary to JSON serializable keys
@@ -241,8 +242,18 @@ class TrackingLog:
                 "detections": detections_json,
             }
 
+        # Automatically auto-caption person crops if OpenAI API is configured
+        try:
+            from src import config
+            if config.ENABLE_AUTO_VISUAL_CAPTIONING and config.OPENAI_API_KEY:
+                from src.ai_assistant import auto_caption_persons
+                data = auto_caption_persons(data)
+        except Exception as e:
+            print(f"[TrackingLog] Warning: Auto-captioning skipped ({e})")
+
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+
 
         print(f"[TrackingLog] Saved tracking log to: {path}")
 

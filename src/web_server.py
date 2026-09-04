@@ -22,9 +22,12 @@ from typing import Dict, Optional
 
 import cv2
 import numpy as np
-from flask import Flask, Response, render_template
+from flask import Flask, Response, render_template, request, jsonify
 
 from src.pipeline import active_ids_by_camera, get_color_hex
+from src.ai_assistant import query_tracking_ai, describe_person_thumbnail
+from src import config
+from pathlib import Path
 
 
 class TrackingWebServer:
@@ -93,6 +96,88 @@ class TrackingWebServer:
                     "X-Accel-Buffering": "no",
                 },
             )
+
+        @app.route("/api/ai/chat", methods=["POST"])
+        def ai_chat():
+            data = request.get_json() or {}
+            prompt = data.get("prompt", "").strip()
+            api_key = data.get("api_key") or config.OPENAI_API_KEY
+
+            if not prompt:
+                return jsonify({"error": "Prompt cannot be empty"}), 400
+
+            # Load tracking log context from disk if available
+            log_path = config.OUTPUT_DIR / "tracking_log.json"
+            log_data = {}
+            if log_path.exists():
+                try:
+                    with open(log_path, "r", encoding="utf-8") as f:
+                        log_data = json.load(f)
+                except Exception as e:
+                    print(f"[WebServer] Warning reading {log_path}: {e}")
+
+            # If tracking log wasn't on disk, construct from live gallery entries
+            if not log_data.get("persons"):
+                entries = self.gallery.get_all_entries_snapshot()
+                persons = {}
+                for entry in entries:
+                    gid = entry["global_id"]
+                    persons[str(gid)] = {
+                        "global_id": gid,
+                        "thumbnail_b64": entry.get("thumbnail_b64"),
+                        "total_detections": entry.get("hit_count", 0),
+                        "cameras_seen": entry.get("cameras_seen", []),
+                        "visual_attributes": entry.get("visual_attributes"),
+                        "appearances": [],
+                    }
+                log_data = {
+                    "cameras": {
+                        str(i): {"fps": 25.0, "total_frames": 0, "video_file": f"cam{i}"}
+                        for i in range(1, self.n_cameras + 1)
+                    },
+                    "persons": persons,
+                }
+
+            response_text = query_tracking_ai(
+                user_prompt=prompt,
+                log_data=log_data,
+                api_key=api_key,
+            )
+            return jsonify({"response": response_text})
+
+        @app.route("/api/ai/describe-person", methods=["POST"])
+        def describe_person():
+            data = request.get_json() or {}
+            gid = data.get("global_id")
+            api_key = data.get("api_key") or config.OPENAI_API_KEY
+
+            if gid is None:
+                return jsonify({"error": "global_id is required"}), 400
+
+            entries = self.gallery.get_all_entries_snapshot()
+            entry = next((e for e in entries if e["global_id"] == int(gid)), None)
+
+            if not entry or not entry.get("thumbnail_b64"):
+                return jsonify({"error": f"Thumbnail not found for person ID {gid}"}), 404
+
+            try:
+                desc = describe_person_thumbnail(entry["thumbnail_b64"], api_key=api_key)
+                entry["visual_attributes"] = desc
+
+                # Also update tracking_log.json on disk if present
+                log_path = config.OUTPUT_DIR / "tracking_log.json"
+                if log_path.exists():
+                    with open(log_path, "r", encoding="utf-8") as f:
+                        log_data = json.load(f)
+                    if str(gid) in log_data.get("persons", {}):
+                        log_data["persons"][str(gid)]["visual_attributes"] = desc
+                        with open(log_path, "w", encoding="utf-8") as f:
+                            json.dump(log_data, f, indent=2)
+
+                return jsonify({"global_id": gid, "visual_attributes": desc})
+            except Exception as err:
+                return jsonify({"error": str(err)}), 500
+
 
     # ── MJPEG generator ───────────────────────────────────────────────────────
 

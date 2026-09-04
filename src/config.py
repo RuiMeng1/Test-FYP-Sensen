@@ -3,9 +3,20 @@ config.py — Central configuration for the tracking pipeline.
 Adjust thresholds, paths, and device settings here.
 """
 
-from pathlib import Path
 import json
+import os
+from pathlib import Path
 import torch
+from dotenv import load_dotenv
+
+# Load environment variables from .env file if present
+load_dotenv()
+
+# ── OpenAI API Settings ───────────────────────────────────────────────────────
+OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+ENABLE_AUTO_VISUAL_CAPTIONING: bool = os.getenv("ENABLE_AUTO_VISUAL_CAPTIONING", "true").lower() in ("true", "1", "yes")
+
 
 # ── Exclusion Zones ──────────────────────────────────────────────────────────
 # Dictionary mapping video filenames to a list of polygons.

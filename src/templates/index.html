@@ -514,12 +514,164 @@
             animation: shimmer 2s infinite;
         }
 
+        /* ── AI Assistant Toggle Button & Drawer ───────────────── */
+        .ai-toggle-btn {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 7px 16px;
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.2), rgba(147, 51, 234, 0.2));
+            border: 1px solid rgba(147, 51, 234, 0.4);
+            border-radius: 20px;
+            color: #e0e7ff;
+            font-family: inherit;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .ai-toggle-btn:hover {
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.35), rgba(147, 51, 234, 0.35));
+            border-color: rgba(167, 139, 250, 0.6);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(147, 51, 234, 0.25);
+        }
+
+        .ai-drawer {
+            width: 360px;
+            background: var(--bg-secondary);
+            border-left: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            transition: all 0.3s ease;
+        }
+
+        .ai-drawer.hidden {
+            display: none;
+        }
+
+        .ai-drawer-header {
+            padding: 16px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: rgba(15, 23, 42, 0.5);
+        }
+
+        .ai-drawer-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            font-weight: 700;
+            color: #c7d2fe;
+        }
+
+        .ai-chat-body {
+            flex: 1;
+            padding: 14px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .quick-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+
+        .quick-chip {
+            background: rgba(30, 41, 59, 0.7);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 4px 10px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .quick-chip:hover {
+            background: rgba(59, 130, 246, 0.2);
+            border-color: var(--accent-blue);
+            color: var(--text-primary);
+        }
+
+        .chat-bubble {
+            padding: 10px 14px;
+            border-radius: 12px;
+            font-size: 12.5px;
+            line-height: 1.45;
+            max-width: 90%;
+            word-wrap: break-word;
+        }
+
+        .chat-bubble.user {
+            align-self: flex-end;
+            background: linear-gradient(135deg, #2563eb, #1d4ed8);
+            color: white;
+            border-bottom-right-radius: 2px;
+        }
+
+        .chat-bubble.ai {
+            align-self: flex-start;
+            background: rgba(30, 41, 59, 0.85);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            border-bottom-left-radius: 2px;
+            white-space: pre-wrap;
+        }
+
+        .ai-input-bar {
+            padding: 12px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 8px;
+            background: rgba(15, 23, 42, 0.6);
+        }
+
+        .ai-input-bar input {
+            flex: 1;
+            background: rgba(15, 23, 42, 0.9);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 8px 12px;
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 12.5px;
+            outline: none;
+        }
+
+        .ai-input-bar input:focus {
+            border-color: var(--accent-blue);
+        }
+
+        .ai-input-bar button {
+            background: var(--accent-blue);
+            border: none;
+            border-radius: 8px;
+            padding: 8px 14px;
+            color: white;
+            font-weight: 600;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        .ai-input-bar button:hover {
+            opacity: 0.9;
+        }
+
         /* ── Responsive ────────────────────────────────────────── */
         @media (max-width: 1024px) {
             .content {
                 flex-direction: column;
             }
-            .logger-panel {
+            .logger-panel, .ai-drawer {
                 width: 100%;
                 min-width: unset;
                 max-height: 40vh;
@@ -531,6 +683,7 @@
             }
         }
     </style>
+
 </head>
 <body>
     <div class="app">
@@ -541,12 +694,17 @@
                 <h1>Sensen — Multi-Camera Tracker</h1>
             </div>
             <div class="header-right">
+                <button id="aiToggleBtn" class="ai-toggle-btn" onclick="toggleAIDrawer()">
+                    <span class="ai-btn-icon">✨</span>
+                    <span>AI Assistant</span>
+                </button>
                 <div class="status-pill">
                     <span class="status-dot"></span>
                     <span id="streamStatus">Connecting…</span>
                 </div>
             </div>
         </header>
+
 
         <!-- Main Content -->
         <div class="content">
@@ -581,7 +739,33 @@
                     </div>
                 </div>
             </div>
+
+            <!-- AI Assistant Drawer -->
+            <div class="ai-drawer hidden" id="aiDrawer">
+                <div class="ai-drawer-header">
+                    <div class="ai-drawer-title">
+                        <span>✨</span> OpenAI Tracking Assistant
+                    </div>
+                    <button style="background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:16px;" onclick="toggleAIDrawer()">✕</button>
+                </div>
+                <div class="ai-chat-body" id="aiChatBody">
+                    <div class="quick-chips">
+                        <span class="quick-chip" onclick="sendQuickPrompt('Where was Person 0 and at what time?')">📍 Person 0 Location & Time</span>
+                        <span class="quick-chip" onclick="sendQuickPrompt('What clothes is Person 0 wearing?')">👔 Person 0 Clothing</span>
+                        <span class="quick-chip" onclick="sendQuickPrompt('How many times does each person appear?')">📊 Appearance Counts</span>
+                        <span class="quick-chip" onclick="sendQuickPrompt('Give me a full summary of all tracked individuals')">📑 Full Tracking Summary</span>
+                    </div>
+                    <div class="chat-bubble ai">
+                        Hello! I am your AI Tracking Assistant. Ask me anything about where people were seen, timestamps, appearance counts, or clothing descriptions across cameras.
+                    </div>
+                </div>
+                <div class="ai-input-bar">
+                    <input type="text" id="aiInput" placeholder="Ask AI about tracking footage..." onkeydown="if(event.key === 'Enter') sendAIPrompt()">
+                    <button onclick="sendAIPrompt()" id="aiSendBtn">Send</button>
+                </div>
+            </div>
         </div>
+
 
         <!-- Status Bar -->
         <div class="status-bar">
@@ -714,8 +898,69 @@
             loggerList.scrollTop = scrollTop;
         }
 
+        // ── AI Assistant Drawer Functions ──────────────────────────────────
+        function toggleAIDrawer() {
+            const drawer = document.getElementById('aiDrawer');
+            drawer.classList.toggle('hidden');
+        }
+
+        function sendQuickPrompt(promptText) {
+            const drawer = document.getElementById('aiDrawer');
+            drawer.classList.remove('hidden');
+            document.getElementById('aiInput').value = promptText;
+            sendAIPrompt();
+        }
+
+        async function sendAIPrompt() {
+            const input = document.getElementById('aiInput');
+            const prompt = input.value.trim();
+            if (!prompt) return;
+
+            const chatBody = document.getElementById('aiChatBody');
+            const sendBtn = document.getElementById('aiSendBtn');
+
+            // Append user message bubble
+            const userBubble = document.createElement('div');
+            userBubble.className = 'chat-bubble user';
+            userBubble.textContent = prompt;
+            chatBody.appendChild(userBubble);
+
+            input.value = '';
+            sendBtn.disabled = true;
+            sendBtn.textContent = 'Thinking...';
+
+            // Append temporary AI thinking bubble
+            const aiBubble = document.createElement('div');
+            aiBubble.className = 'chat-bubble ai';
+            aiBubble.textContent = 'Analyzing tracking logs & vision data…';
+            chatBody.appendChild(aiBubble);
+            chatBody.scrollTop = chatBody.scrollHeight;
+
+            try {
+                const res = await fetch('/api/ai/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt })
+                });
+
+                const data = await res.json();
+                if (data.error) {
+                    aiBubble.textContent = `⚠️ ${data.error}`;
+                } else {
+                    aiBubble.textContent = data.response;
+                }
+            } catch (err) {
+                aiBubble.textContent = `❌ Network Error: ${err.message}`;
+            } finally {
+                sendBtn.disabled = false;
+                sendBtn.textContent = 'Send';
+                chatBody.scrollTop = chatBody.scrollHeight;
+            }
+        }
+
         // Start SSE connection
         connectSSE();
     </script>
 </body>
 </html>
+
