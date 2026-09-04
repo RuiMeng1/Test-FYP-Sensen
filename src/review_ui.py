@@ -49,7 +49,6 @@ ACCENT_GREEN   = "#10b981"
 ACCENT_BLUE    = "#3b82f6"
 ACCENT_RED     = "#ef4444"
 ACCENT_YELLOW  = "#f59e0b"
-ACCENT_PURPLE  = "#8b5cf6"
 
 
 class ReviewUI:
@@ -278,7 +277,7 @@ class ReviewUI:
         )
         self._time_label.pack(side=tk.RIGHT, padx=16, pady=8)
 
-        # ── Main container (Holds both Video & Gallery views) ──────────────────
+        # ── Main container ────────────────────────────────────────────────────
         self._content_root = tk.Frame(self.root, bg=BG_PRIMARY)
         self._content_root.pack(fill=tk.BOTH, expand=True)
 
@@ -337,35 +336,28 @@ class ReviewUI:
 
     def _build_video_section(self, parent: tk.Frame) -> None:
         """Build the video playback area with camera tiles and logger panel."""
-        # Right sidebar: Logger panel
         logger_panel = tk.Frame(parent, bg=BG_SECONDARY, width=400)
         logger_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=8)
         logger_panel.pack_propagate(False)
         self._build_logger(logger_panel)
 
-        # Left: Camera feeds + View Switcher + Playback controls
         left_panel = tk.Frame(parent, bg=BG_PRIMARY)
         left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # View Switcher Bar
         self._build_view_switcher(left_panel)
 
-        # Camera grid / single container
         self._camera_frame = tk.Frame(left_panel, bg=BG_PRIMARY)
         self._camera_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 4))
 
-        # Playback controls
         controls = tk.Frame(left_panel, bg="#0f172a", height=56)
         controls.pack(fill=tk.X, padx=8, pady=(0, 8))
         controls.pack_propagate(False)
         self._build_controls(controls)
 
-        # Build Camera Tiles
         self._build_camera_tiles()
         self._apply_view_layout()
 
     def _build_view_switcher(self, parent: tk.Frame) -> None:
-        """Toolbar with manual view switching buttons and auto-tracking status."""
         bar = tk.Frame(parent, bg="#0f172a", height=42)
         bar.pack(fill=tk.X, padx=8, pady=(8, 0))
         bar.pack_propagate(False)
@@ -381,7 +373,6 @@ class ReviewUI:
             "cursor": "hand2", "padx": 10, "pady": 3
         }
 
-        # Grid view button
         self._btn_grid = tk.Button(
             bar, text="▦ All Cameras (Grid)",
             command=self._set_view_grid, **btn_style
@@ -389,7 +380,6 @@ class ReviewUI:
         self._btn_grid.pack(side=tk.LEFT, padx=3, pady=6)
         self._cam_view_btns["grid"] = self._btn_grid
 
-        # Per-camera buttons
         for cam_id in sorted(self._caps.keys()):
             b = tk.Button(
                 bar, text=f"📷 Cam {cam_id}",
@@ -398,7 +388,6 @@ class ReviewUI:
             b.pack(side=tk.LEFT, padx=3, pady=6)
             self._cam_view_btns[f"cam_{cam_id}"] = b
 
-        # Auto-tracking indicator
         self._tracking_status_frame = tk.Frame(bar, bg="#0f172a")
         self._tracking_status_frame.pack(side=tk.RIGHT, padx=12, pady=6)
 
@@ -416,7 +405,6 @@ class ReviewUI:
         )
 
     def _build_controls(self, parent: tk.Frame) -> None:
-        """Build playback controls: step back, play/pause, step forward, seek slider."""
         btn_frame = tk.Frame(parent, bg="#0f172a")
         btn_frame.pack(side=tk.LEFT, padx=12, pady=8)
 
@@ -452,7 +440,6 @@ class ReviewUI:
         self._seek_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8, pady=8)
 
     def _build_logger(self, parent: tk.Frame) -> None:
-        """Build the person logger panel in the right sidebar."""
         header = tk.Frame(parent, bg=BG_SECONDARY)
         header.pack(fill=tk.X, padx=12, pady=(12, 8))
 
@@ -513,7 +500,6 @@ class ReviewUI:
         self._build_person_cards()
 
     def _build_camera_tiles(self) -> None:
-        """Create camera tile widgets."""
         for cam_id in sorted(self._caps.keys()):
             card = tk.Frame(self._camera_frame, bg=BG_SECONDARY, bd=0)
             card.grid_rowconfigure(0, weight=1)
@@ -536,7 +522,6 @@ class ReviewUI:
                 w.bind("<Double-Button-1>", lambda e, c=cam_id: self._toggle_camera_fullscreen(c))
 
     def _apply_view_layout(self) -> None:
-        """Apply either grid layout or single full-screen camera layout."""
         for r in range(10):
             self._camera_frame.grid_rowconfigure(r, weight=0, uniform="")
             self._camera_frame.grid_columnconfigure(r, weight=0, uniform="")
@@ -588,7 +573,6 @@ class ReviewUI:
 
     def _build_gallery_section(self, parent: tk.Frame) -> None:
         """Build the People Gallery section for reviewing person profiles and merging IDs."""
-        # Top toolbar
         toolbar = tk.Frame(parent, bg="#0f172a", height=60)
         toolbar.pack(fill=tk.X, padx=12, pady=(10, 6))
         toolbar.pack_propagate(False)
@@ -608,11 +592,6 @@ class ReviewUI:
         )
         self._gallery_subtitle.pack(anchor="w")
 
-        # Merge instruction & action area
-        self._merge_banner = tk.Frame(toolbar, bg="#0f172a")
-        self._merge_banner.pack(side=tk.RIGHT, padx=12, pady=8)
-
-        # Banner alert bar (active when a merge source is picked)
         self._merge_alert_frame = tk.Frame(parent, bg="#78350f", height=42)
         self._merge_alert_label = tk.Label(
             self._merge_alert_frame, text="",
@@ -629,7 +608,6 @@ class ReviewUI:
         )
         self._merge_cancel_btn.pack(side=tk.RIGHT, padx=12, pady=6)
 
-        # Scrollable gallery grid container
         grid_container = tk.Frame(parent, bg=BG_PRIMARY)
         grid_container.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
 
@@ -667,7 +645,6 @@ class ReviewUI:
             widget.destroy()
         self._gallery_thumb_refs.clear()
 
-        # Update subtitles & tab title
         count = len(self.persons)
         self._gallery_subtitle.configure(
             text=f"{count} distinct person identities detected across cameras. Click 'Merge into...' to merge duplicate IDs."
@@ -675,11 +652,10 @@ class ReviewUI:
         self._tab_gallery_btn.configure(text=f"👥 People Gallery ({count})")
         self._count_label.configure(text=f"{count} IDs")
 
-        # Update merge alert bar
         if self._merge_source_gid is not None:
             src = self._merge_source_gid
             self._merge_alert_label.configure(
-                text=f"⚠️ MERGE MODE: Selected ID:{src:03d} — Now click 'Merge Into This' on the duplicate person card below."
+                text=f"⚠️ MERGE MODE: Selected ID:{src:03d} — Now click 'Merge into ID...' on the target card below."
             )
             self._merge_alert_frame.pack(fill=tk.X, padx=12, pady=(0, 6), before=self._gallery_grid_frame.master)
         else:
@@ -692,7 +668,6 @@ class ReviewUI:
             ).pack()
             return
 
-        # Arrange in responsive grid (columns: 3 or 4)
         cols = 3
         for idx, gid in enumerate(sorted(self.persons.keys())):
             row, col = divmod(idx, cols)
@@ -715,7 +690,7 @@ class ReviewUI:
         card = tk.Frame(card_outer, bg=bg_card, padx=12, pady=12)
         card.pack(fill=tk.BOTH, expand=True)
 
-        # ── Top Row: ID Badge & Color Swatch ──────────────────────────────────
+        # Top Row
         top_row = tk.Frame(card, bg=bg_card)
         top_row.pack(fill=tk.X, pady=(0, 10))
 
@@ -741,11 +716,10 @@ class ReviewUI:
                 bg=bg_card, fg=TEXT_MUTED, font=("Menlo", 10)
             ).pack(side=tk.RIGHT)
 
-        # ── Middle Row: Photo Thumbnail + Detailed Stats ──────────────────────
+        # Middle Row
         mid_row = tk.Frame(card, bg=bg_card)
         mid_row.pack(fill=tk.X, pady=(0, 10))
 
-        # Larger Thumbnail Photo
         thumb_w, thumb_h = 95, 125
         thumb_frame = tk.Frame(mid_row, bg=BORDER, width=thumb_w, height=thumb_h)
         thumb_frame.pack_propagate(False)
@@ -767,11 +741,9 @@ class ReviewUI:
             tk.Label(thumb_frame, text="👤", bg=BG_SECONDARY, fg=TEXT_MUTED,
                      font=("Helvetica", 28)).pack(fill=tk.BOTH, expand=True)
 
-        # Stats Column
         stats_col = tk.Frame(mid_row, bg=bg_card)
         stats_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Total appearances
         apps = person.get("appearances", [])
         total_sec = sum(a.get("duration_seconds", 0) for a in apps)
         tk.Label(
@@ -784,7 +756,6 @@ class ReviewUI:
             bg=bg_card, fg=TEXT_MUTED, font=("Helvetica", 10)
         ).pack(anchor="w", pady=(0, 6))
 
-        # Cameras seen badges
         tk.Label(
             stats_col, text="Cameras Visited:",
             bg=bg_card, fg=TEXT_SECONDARY, font=("Helvetica", 9, "bold")
@@ -803,11 +774,10 @@ class ReviewUI:
         else:
             tk.Label(cam_tag_row, text="None", bg=bg_card, fg=TEXT_MUTED, font=("Helvetica", 9)).pack()
 
-        # ── Bottom Row: Action Buttons (Merge & View) ─────────────────────────
+        # Bottom Row
         btn_row = tk.Frame(card, bg=bg_card)
         btn_row.pack(fill=tk.X, pady=(6, 0))
 
-        # View in Video button
         view_btn = tk.Button(
             btn_row, text="▶ View in Video",
             command=lambda g=gid: self._jump_to_person_video(g),
@@ -817,7 +787,6 @@ class ReviewUI:
         )
         view_btn.pack(side=tk.LEFT, padx=(0, 6))
 
-        # Merge Button (Handles 2 states: start merge vs merge into target)
         if not is_merge_active:
             merge_btn = tk.Button(
                 btn_row, text="🔗 Merge with...",
@@ -837,9 +806,8 @@ class ReviewUI:
             )
             cancel_btn.pack(side=tk.RIGHT)
         else:
-            # Target merge candidate button
             confirm_btn = tk.Button(
-                btn_row, text=f"✓ Merge ID:{self._merge_source_gid:03d} into ID:{gid:03d}",
+                btn_row, text=f"✓ Merge into ID:{gid:03d}",
                 command=lambda g=gid: self._confirm_merge(self._merge_source_gid, g),
                 bg=ACCENT_GREEN, fg="#000000", font=("Helvetica", 9, "bold"),
                 bd=0, activebackground="#059669", activeforeground="white",
@@ -850,17 +818,14 @@ class ReviewUI:
     # ── Merge ID Functionality ────────────────────────────────────────────────
 
     def _start_merge(self, source_gid: int) -> None:
-        """Select a person ID to begin manual merge."""
         self._merge_source_gid = source_gid
         self._rebuild_gallery_grid()
 
     def _cancel_merge(self) -> None:
-        """Cancel ongoing merge selection."""
         self._merge_source_gid = None
         self._rebuild_gallery_grid()
 
     def _confirm_merge(self, source_gid: int, target_gid: int) -> None:
-        """Prompt user confirmation and perform merge."""
         if source_gid == target_gid:
             return
 
@@ -884,7 +849,6 @@ class ReviewUI:
             self._execute_merge(source_gid, target_gid)
 
     def _execute_merge(self, source_gid: int, target_gid: int) -> None:
-        """Execute the merge of source_gid into target_gid across data structures and disk."""
         print(f"[ReviewUI] 🔄 Merging Person ID:{source_gid:03d} → ID:{target_gid:03d} …")
 
         source_person = self.persons.get(source_gid)
@@ -911,7 +875,7 @@ class ReviewUI:
             target_person.get("total_detections", 0) + source_person.get("total_detections", 0)
         )
 
-        # 4. Use best thumbnail (keep target, or take source if target is missing)
+        # 4. Use best thumbnail
         if not target_person.get("thumbnail_b64") and source_person.get("thumbnail_b64"):
             target_person["thumbnail_b64"] = source_person["thumbnail_b64"]
 
@@ -960,7 +924,6 @@ class ReviewUI:
         )
 
     def _jump_to_person_video(self, gid: int) -> None:
-        """Jump from People Gallery directly to the first appearance in the Video view."""
         person = self.persons.get(gid, {})
         apps = person.get("appearances", [])
         if apps:
