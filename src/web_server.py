@@ -41,7 +41,8 @@ class TrackingWebServer:
     port        : HTTP port to listen on.
     """
 
-    def __init__(self, gallery, n_cameras: int, port: int = 5000):
+    def __init__(self, gallery, n_cameras: int, port: int = 5001):
+
         self.gallery = gallery
         self.n_cameras = n_cameras
         self.port = port

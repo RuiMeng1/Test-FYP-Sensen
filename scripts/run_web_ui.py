@@ -161,7 +161,8 @@ def describe_person():
 
 
 def main():
-    port = 5000
+    port = 5001
+
     print(f"\n╔══════════════════════════════════════════════════════════╗")
     print(f"║  Sensen Web Review Dashboard & OpenAI AI Assistant       ║")
     print(f"╠══════════════════════════════════════════════════════════╣")
