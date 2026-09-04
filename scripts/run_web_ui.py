@@ -19,7 +19,7 @@ ROOT = Path(__file__).parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from flask import Flask, Response, render_template, request, jsonify
+from flask import Flask, Response, render_template, request, jsonify, send_from_directory
 
 from src.pipeline import get_color_hex
 from src.ai_assistant import query_tracking_ai, describe_person_thumbnail
@@ -32,7 +32,41 @@ LOG_PATH = OUTPUT_DIR / "tracking_log.json"
 app = Flask(
     __name__,
     template_folder=str(ROOT / "src" / "templates"),
+    static_folder=str(ROOT / "src" / "static"),
+    static_url_path="/static",
 )
+
+
+@app.route("/videos/<path:filename>")
+def serve_video(filename: str):
+    """Serve recorded MP4 files from output/ directory."""
+    return send_from_directory(OUTPUT_DIR, filename)
+
+
+@app.route("/api/camera_videos")
+def camera_videos():
+    """Returns mapping of {cam_id: filename} for tracked videos in output/."""
+    video_map = {}
+    if LOG_PATH.exists():
+        try:
+            with open(LOG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for cid_str, meta in data.get("cameras", {}).items():
+                cid = int(cid_str)
+                vf = meta.get("video_file", "")
+                if vf and (OUTPUT_DIR / vf).exists():
+                    video_map[cid] = vf
+        except Exception:
+            pass
+
+    if not video_map:
+        for cid in range(1, 5):
+            candidates = list(OUTPUT_DIR.glob(f"cam{cid}_*tracked.mp4"))
+            if candidates:
+                video_map[cid] = candidates[0].name
+
+    return jsonify(video_map)
+
 
 
 @app.route("/")
@@ -107,12 +141,22 @@ def persons_sse():
                     with open(LOG_PATH, "r", encoding="utf-8") as f:
                         log_data = json.load(f)
 
+                    cameras_meta = log_data.get("cameras", {})
                     persons_dict = log_data.get("persons", {})
                     total_tracked = len(persons_dict)
 
                     for gid_str, pinfo in persons_dict.items():
                         gid = int(gid_str)
                         cams_seen = pinfo.get("cameras_seen", [])
+
+                        # Enrich each appearance with fps from camera metadata
+                        raw_appearances = pinfo.get("appearances", [])
+                        enriched = []
+                        for app in raw_appearances:
+                            cam_meta = cameras_meta.get(str(app.get("camera_id", "")), {})
+                            fps = cam_meta.get("fps", 25.0)
+                            enriched.append({**app, "fps": fps})
+
                         persons.append({
                             "global_id": gid,
                             "color_hex": get_color_hex(gid),
@@ -122,7 +166,7 @@ def persons_sse():
                             "is_active": True,
                             "thumbnail_b64": pinfo.get("thumbnail_b64"),
                             "visual_attributes": pinfo.get("visual_attributes"),
-                            "appearances": pinfo.get("appearances", []),
+                            "appearances": enriched,
                         })
 
 

@@ -89,6 +89,13 @@
             background-clip: text;
         }
 
+        .sensen-logo-img {
+            height: 36px;
+            width: auto;
+            object-fit: contain;
+            filter: drop-shadow(0 1px 4px rgba(0,0,0,0.5));
+        }
+
         .header-right {
             display: flex;
             align-items: center;
@@ -160,7 +167,8 @@
             box-shadow: 0 0 20px rgba(59, 130, 246, 0.08);
         }
 
-        .camera-card img {
+        .camera-card img,
+        .camera-card video {
             width: 100%;
             height: 100%;
             object-fit: contain;
@@ -551,7 +559,98 @@
             border-left: 2px solid var(--person-color, #10b981);
         }
 
+        /* ── View Control Bar & Single Camera Fullscreen Zoom ── */
+        .view-control-bar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            background: rgba(15, 23, 42, 0.6);
+            border-bottom: 1px solid var(--border);
+            border-radius: 8px 8px 0 0;
+        }
+
+        .view-btn {
+            background: rgba(30, 41, 59, 0.7);
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            font-size: 11.5px;
+            font-weight: 500;
+            padding: 5px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .view-btn:hover, .view-btn.active {
+            background: rgba(59, 130, 246, 0.25);
+            border-color: var(--accent-blue);
+            color: white;
+        }
+
+        .auto-follow-tag {
+            margin-left: auto;
+            font-size: 11px;
+            font-weight: 600;
+            background: rgba(245, 158, 11, 0.15);
+            border: 1px solid rgba(245, 158, 11, 0.4);
+            color: #fcd34d;
+            padding: 4px 10px;
+            border-radius: 12px;
+        }
+
+        .camera-grid.single-mode .camera-card {
+            display: none !important;
+        }
+
+        .camera-grid.single-mode .camera-card.single-active {
+            display: flex !important;
+            grid-column: 1 / -1;
+            height: 100%;
+            min-height: 480px;
+        }
+
+        /* ── Video Player Controls ──────────────────────────────── */
+        .video-control-bar {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 14px;
+            background: rgba(15, 23, 42, 0.8);
+            border-top: 1px solid var(--border);
+            border-radius: 0 0 8px 8px;
+        }
+
+        .play-btn {
+            background: var(--accent-blue);
+            border: none;
+            color: white;
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .play-btn:hover {
+            opacity: 0.9;
+        }
+
+        .video-control-bar input[type=range] {
+            flex: 1;
+            accent-color: var(--accent-blue);
+            cursor: pointer;
+        }
+
+        .time-display {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11.5px;
+            color: var(--text-secondary);
+            min-width: 90px;
+        }
+
         /* ── Loading shimmer ───────────────────────────────────── */
+
 
         @keyframes shimmer {
             0% { background-position: -200% 0; }
@@ -743,8 +842,7 @@
         <!-- Header -->
         <header class="header">
             <div class="header-left">
-                <div class="logo">S</div>
-                <h1>Sensen — Multi-Camera Tracker</h1>
+                <img src="/static/sensen_logo.png" alt="Sensen.ai" class="sensen-logo-img">
             </div>
             <div class="header-right">
                 <button id="aiToggleBtn" class="ai-toggle-btn" onclick="toggleAIDrawer()">
@@ -763,11 +861,19 @@
         <div class="content">
             <!-- Camera Feeds -->
             <div class="camera-panel">
-                <div class="camera-grid">
+                <!-- View Control Bar -->
+                <div class="view-control-bar">
+                    <button class="view-btn active" id="btnViewGrid" onclick="setGridMode()">🔲 Grid View</button>
                     {% for cam_id in camera_ids %}
-                    <div class="camera-card" data-cam-id="{{ cam_id }}">
-                        <img src="/video_feed/{{ cam_id }}" alt="Camera {{ cam_id }}" loading="eager">
+                    <button class="view-btn" id="btnViewCam{{ cam_id }}" onclick="zoomToCamera({{ cam_id }})">📹 Cam {{ cam_id }}</button>
+                    {% endfor %}
+                    <span id="autoFollowIndicator" class="auto-follow-tag hidden">🎯 Auto-Following: None</span>
+                </div>
 
+                <div class="camera-grid" id="cameraGrid">
+                    {% for cam_id in camera_ids %}
+                    <div class="camera-card" data-cam-id="{{ cam_id }}" ondblclick="zoomToCamera({{ cam_id }})">
+                        <img id="camFeed-{{ cam_id }}" src="/video_feed/{{ cam_id }}" alt="Camera {{ cam_id }}" loading="eager">
                         <div class="camera-label">
                             <span class="camera-label-dot"></span>
                             Cam {{ cam_id }}
@@ -775,7 +881,15 @@
                     </div>
                     {% endfor %}
                 </div>
+
+                <!-- Video Controls Bar -->
+                <div class="video-control-bar">
+                    <button id="btnPlayPause" class="play-btn" onclick="togglePlayPause()">▶ Play</button>
+                    <input type="range" id="seekSlider" min="0" max="100" value="0" step="0.1" oninput="onSeekInput(this.value)">
+                    <span id="timeDisplay" class="time-display">0:00 / 0:00</span>
+                </div>
             </div>
+
 
             <!-- Logger Panel -->
             <div class="logger-panel">
@@ -844,35 +958,239 @@
     </div>
 
     <script>
-        // ── SSE: Real-time person logger updates ─────────────────────────────
-        const loggerList = document.getElementById('loggerList');
-        const personCount = document.getElementById('personCount');
+        // ── DOM references ────────────────────────────────────────────────────
+        const loggerList    = document.getElementById('loggerList');
+        const personCount   = document.getElementById('personCount');
         const statusTracked = document.getElementById('statusTracked');
-        const statusActive = document.getElementById('statusActive');
-        const streamStatus = document.getElementById('streamStatus');
+        const statusActive  = document.getElementById('statusActive');
+        const streamStatus  = document.getElementById('streamStatus');
 
+        // ── Video player state ────────────────────────────────────────────────
+        const videoMap = {};   // { camId: HTMLVideoElement }
+        let masterCamId = null;
+
+        // ── Helpers ───────────────────────────────────────────────────────────
+        function fmtTime(sec) {
+            if (!isFinite(sec) || sec < 0) return '0:00';
+            const m = Math.floor(sec / 60);
+            const s = Math.floor(sec % 60);
+            return `${m}:${String(s).padStart(2, '0')}`;
+        }
+
+        function updateTimeDisplay(current, duration) {
+            document.getElementById('timeDisplay').textContent =
+                `${fmtTime(current)} / ${fmtTime(duration || 0)}`;
+        }
+
+        // ── Master clock timeupdate ───────────────────────────────────────────
+        function onMasterTimeUpdate() {
+            const master = videoMap[masterCamId];
+            if (!master) return;
+            const t   = master.currentTime;
+            const dur = master.duration || 0;
+
+            // Sync seek slider
+            if (!master.seeking && dur > 0) {
+                document.getElementById('seekSlider').value = (t / dur) * 100;
+            }
+            updateTimeDisplay(t, dur);
+
+            // Sync sibling videos (re-align if >0.5s drift)
+            for (const [cid, vid] of Object.entries(videoMap)) {
+                if (parseInt(cid) !== masterCamId && !vid.seeking) {
+                    if (Math.abs(vid.currentTime - t) > 0.5) {
+                        vid.currentTime = t;
+                    }
+                }
+            }
+
+            // Drive auto-follow on every frame tick
+            checkAutoFollow();
+        }
+
+        // ── Video player initialisation ───────────────────────────────────────
+        async function initVideoPlayers() {
+            let videoFiles = {};
+            try {
+                const res = await fetch('/api/camera_videos');
+                videoFiles = await res.json();
+            } catch (e) {
+                console.warn('[Sensen] Could not load camera video list; keeping MJPEG streams.', e);
+                return;
+            }
+
+            const camIds = Object.keys(videoFiles).map(Number).sort();
+            if (camIds.length === 0) {
+                console.warn('[Sensen] No video files found; keeping MJPEG streams.');
+                return;
+            }
+
+            for (const camId of camIds) {
+                const filename = videoFiles[String(camId)];
+                const existing = document.getElementById(`camFeed-${camId}`);
+                if (!existing) continue;
+
+                const vid = document.createElement('video');
+                vid.id          = `camFeed-${camId}`;
+                vid.src         = `/videos/${filename}`;
+                vid.preload     = 'metadata';
+                vid.muted       = true;   // required for autoplay in browsers
+                vid.playsInline = true;
+                existing.replaceWith(vid);
+                videoMap[camId] = vid;
+
+                if (masterCamId === null) {
+                    masterCamId = camId;
+                    vid.addEventListener('timeupdate', onMasterTimeUpdate);
+                    vid.addEventListener('loadedmetadata', () => {
+                        updateTimeDisplay(0, vid.duration);
+                    });
+                    vid.addEventListener('play',  () => { document.getElementById('btnPlayPause').textContent = '⏸ Pause'; });
+                    vid.addEventListener('pause', () => { document.getElementById('btnPlayPause').textContent = '▶ Play'; });
+                    vid.addEventListener('ended', () => { document.getElementById('btnPlayPause').textContent = '▶ Play'; });
+                }
+            }
+            console.log(`[Sensen] Loaded ${camIds.length} video(s): master cam = ${masterCamId}`);
+        }
+
+        // ── Playback controls (wired to buttons / slider in HTML) ─────────────
+        function togglePlayPause() {
+            const master = videoMap[masterCamId];
+            if (!master) return;
+            if (master.paused || master.ended) {
+                Object.values(videoMap).forEach(v => v.play());
+            } else {
+                Object.values(videoMap).forEach(v => v.pause());
+            }
+        }
+
+        function onSeekInput(val) {
+            const master = videoMap[masterCamId];
+            if (!master || !master.duration) return;
+            const t = (parseFloat(val) / 100) * master.duration;
+            Object.values(videoMap).forEach(v => { v.currentTime = t; });
+            updateTimeDisplay(t, master.duration);
+        }
+
+        // ── Timeline click: seek all videos + zoom to the right camera ────────
+        function seekToTime(seconds, camId) {
+            // 1. Zoom the grid to this camera
+            if (camId !== undefined && camId !== null) {
+                zoomToCamera(camId);
+            }
+            // 2. Seek ALL camera videos to this timestamp
+            Object.values(videoMap).forEach(v => { v.currentTime = seconds; });
+            // 3. Sync slider + time display
+            const master = videoMap[masterCamId];
+            if (master && master.duration) {
+                document.getElementById('seekSlider').value = (seconds / master.duration) * 100;
+                updateTimeDisplay(seconds, master.duration);
+            }
+        }
+
+        // ── View control ──────────────────────────────────────────────────────
+        let currentViewMode = 'grid';
+        let selectedCamId   = null;
+        let autoFollowGid   = null;
+
+        function setGridMode() {
+            currentViewMode = 'grid';
+            selectedCamId   = null;
+            document.getElementById('cameraGrid').classList.remove('single-mode');
+            document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+            const btnGrid = document.getElementById('btnViewGrid');
+            if (btnGrid) btnGrid.classList.add('active');
+            document.querySelectorAll('.camera-card').forEach(c => c.classList.remove('single-active', 'focused'));
+        }
+
+        function zoomToCamera(camId) {
+            currentViewMode = 'single';
+            selectedCamId   = camId;
+            document.getElementById('cameraGrid').classList.add('single-mode');
+            document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+            const btnCam = document.getElementById(`btnViewCam${camId}`);
+            if (btnCam) btnCam.classList.add('active');
+            document.querySelectorAll('.camera-card').forEach(card => {
+                const cid = parseInt(card.getAttribute('data-cam-id'));
+                card.classList.toggle('single-active', cid === camId);
+                card.classList.toggle('focused',       cid === camId);
+            });
+        }
+
+        // Alias used by cam-tag onclick buttons in person cards
+        function focusCamera(camId) { zoomToCamera(camId); }
+
+        // ── Auto-follow ───────────────────────────────────────────────────────
+        function startAutoFollow(gid, event) {
+            if (event) event.stopPropagation();
+            if (autoFollowGid === gid) {
+                // Toggle off
+                autoFollowGid = null;
+                document.getElementById('autoFollowIndicator').classList.add('hidden');
+                setGridMode();
+            } else {
+                autoFollowGid = gid;
+                const tag = document.getElementById('autoFollowIndicator');
+                tag.classList.remove('hidden');
+                tag.textContent = `🎯 Auto-Following: ID:${String(gid).padStart(3, '0')}`;
+                checkAutoFollow();
+            }
+            if (window.lastPersonsData) {
+                renderPersons(window.lastPersonsData.persons, window.lastPersonsData.total_tracked);
+            }
+        }
+
+        function checkAutoFollow() {
+            if (autoFollowGid === null || !window.lastPersonsData) return;
+            const person = window.lastPersonsData.persons.find(p => p.global_id === autoFollowGid);
+            if (!person) return;
+
+            const master = videoMap[masterCamId];
+            const hasVideo = master && isFinite(master.currentTime) && master.duration > 0;
+
+            if (hasVideo && person.appearances && person.appearances.length > 0) {
+                // ── Review mode: match playback position to appearance windows ──
+                const t = master.currentTime;
+                let found = null;
+                for (const app of person.appearances) {
+                    const fps      = app.fps || 25.0;
+                    const startSec = app.first_frame / fps;
+                    const endSec   = (app.last_frame + 1) / fps;
+                    // Small tolerance so transitions feel smooth
+                    if (t >= startSec - 0.15 && t <= endSec + 0.25) {
+                        found = app;
+                        break;
+                    }
+                }
+                if (found) {
+                    if (selectedCamId !== found.camera_id) zoomToCamera(found.camera_id);
+                } else {
+                    if (currentViewMode !== 'grid') setGridMode();
+                }
+            } else {
+                // ── Live mode: use active_cameras from SSE ──
+                const activeCams = person.active_cameras || [];
+                if (activeCams.length === 0) {
+                    if (currentViewMode !== 'grid') setGridMode();
+                } else {
+                    if (selectedCamId !== activeCams[0]) zoomToCamera(activeCams[0]);
+                }
+            }
+        }
+
+        // ── SSE: real-time / review person logger ─────────────────────────────
         let eventSource = null;
 
         function connectSSE() {
             eventSource = new EventSource('/api/persons');
-
-            eventSource.onopen = () => {
-                streamStatus.textContent = 'Live';
-            };
-
+            eventSource.onopen   = () => { streamStatus.textContent = 'Live'; };
             eventSource.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
-                    if (data.error) {
-                        console.error('SSE error:', data.error);
-                        return;
-                    }
+                    if (data.error) { console.error('SSE error:', data.error); return; }
                     renderPersons(data.persons, data.total_tracked);
-                } catch (e) {
-                    console.error('Parse error:', e);
-                }
+                } catch (e) { console.error('Parse error:', e); }
             };
-
             eventSource.onerror = () => {
                 streamStatus.textContent = 'Reconnecting…';
                 eventSource.close();
@@ -880,109 +1198,91 @@
             };
         }
 
+        // ── Person card expand/collapse ───────────────────────────────────────
         const expandedGids = new Set();
 
         function toggleExpandPerson(gid) {
-            if (expandedGids.has(gid)) {
-                expandedGids.delete(gid);
-            } else {
-                expandedGids.add(gid);
-            }
-            // Trigger quick re-render if cached data exists
+            expandedGids.has(gid) ? expandedGids.delete(gid) : expandedGids.add(gid);
             if (window.lastPersonsData) {
                 renderPersons(window.lastPersonsData.persons, window.lastPersonsData.total_tracked);
             }
         }
 
-        function focusCamera(camId) {
-            document.querySelectorAll('.camera-card').forEach(card => {
-                card.classList.remove('focused');
-            });
-            const target = document.querySelector(`.camera-card[data-cam-id="${camId}"]`);
-            if (target) {
-                target.classList.add('focused');
-                target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-            }
-        }
-
+        // ── Render person cards ───────────────────────────────────────────────
         function renderPersons(persons, totalTracked) {
             window.lastPersonsData = { persons, total_tracked: totalTracked };
 
-            // Update counters
-            personCount.textContent = totalTracked;
+            personCount.textContent  = totalTracked;
             statusTracked.textContent = totalTracked;
-            const activeCount = persons.filter(p => p.is_active).length;
-            statusActive.textContent = activeCount;
+            statusActive.textContent  = persons.filter(p => p.is_active).length;
 
             if (persons.length === 0) {
-                loggerList.innerHTML = `
-                    <div class="empty-state">
-                        <span class="empty-state-icon">🔍</span>
-                        <span class="empty-state-text">Waiting for detections…</span>
-                    </div>`;
+                loggerList.innerHTML = `<div class="empty-state"><span class="empty-state-icon">🔍</span><span class="empty-state-text">Waiting for detections…</span></div>`;
                 return;
             }
 
-            // Sort: active persons first, then by global_id
             persons.sort((a, b) => {
                 if (a.is_active !== b.is_active) return b.is_active - a.is_active;
                 return a.global_id - b.global_id;
             });
 
-            // Preserve scroll position
             const scrollTop = loggerList.scrollTop;
-
             let html = '';
+
             for (const person of persons) {
                 const activeClass = person.is_active ? 'active' : 'inactive';
-                const idStr = String(person.global_id).padStart(3, '0');
-                const isExpanded = expandedGids.has(person.global_id);
+                const idStr       = String(person.global_id).padStart(3, '0');
+                const isExpanded  = expandedGids.has(person.global_id);
+                const isFollowing = autoFollowGid === person.global_id;
 
-                // Thumbnail
                 const thumbHtml = person.thumbnail_b64
                     ? `<img src="data:image/jpeg;base64,${person.thumbnail_b64}" alt="ID ${person.global_id}">`
                     : `<span class="no-thumb">👤</span>`;
 
-                // Camera tags (all cameras ever seen)
-                const camTags = (person.cameras_seen || []).map(c => {
-                    return `<span class="cam-tag active-cam" onclick="event.stopPropagation(); focusCamera(${c})">Cam ${c}</span>`;
-                }).join('');
+                const camTags = (person.cameras_seen || []).map(c =>
+                    `<span class="cam-tag active-cam" onclick="event.stopPropagation(); focusCamera(${c})">Cam ${c}</span>`
+                ).join('');
 
-                // Visual attributes badge
                 const visualHtml = person.visual_attributes
-                    ? `<div class="visual-attr-badge">💬 ${person.visual_attributes}</div>`
-                    : '';
+                    ? `<div class="visual-attr-badge">💬 ${person.visual_attributes}</div>` : '';
 
-                // Appearance timeline drawer
                 let timelineHtml = '';
                 if (isExpanded && person.appearances && person.appearances.length > 0) {
                     const items = person.appearances.map(a => {
-                        const tStart = a.first_timestamp || '0:00';
-                        const tEnd = a.last_timestamp || '0:00';
-                        const dur = a.duration_seconds || 0;
+                        const tStart   = a.first_timestamp || '0:00';
+                        const tEnd     = a.last_timestamp  || '0:00';
+                        const dur      = a.duration_seconds || 0;
+                        const fps      = a.fps || 25.0;
+                        const startSec = (a.first_frame / fps).toFixed(2);
                         return `
-                            <div class="timeline-item" onclick="event.stopPropagation(); focusCamera(${a.camera_id})">
+                            <div class="timeline-item" onclick="event.stopPropagation(); seekToTime(${startSec}, ${a.camera_id})">
                                 <span>📷 Cam ${a.camera_id}</span>
                                 <span>⏱️ ${tStart} ➔ ${tEnd} (${dur}s)</span>
                             </div>`;
                     }).join('');
-
                     timelineHtml = `
                         <div class="timeline-drawer">
-                            <div style="font-size:11px; font-weight:600; color:var(--text-muted);">APPEARANCE TIMELINE</div>
+                            <div style="font-size:11px;font-weight:600;color:var(--text-muted);">APPEARANCE TIMELINE — click to jump</div>
                             ${items}
                         </div>`;
                 }
 
+                const followBtnHtml = `
+                    <button class="cam-tag${isFollowing ? ' active-cam' : ''}" style="margin-left:6px;cursor:pointer;"
+                        onclick="startAutoFollow(${person.global_id}, event)">
+                        ${isFollowing ? '🎯 Following' : '🎯 Follow'}
+                    </button>`;
+
                 html += `
-                    <div class="person-card ${activeClass}" style="--person-color: ${person.color_hex}" onclick="toggleExpandPerson(${person.global_id})">
+                    <div class="person-card ${activeClass}" style="--person-color:${person.color_hex}" onclick="toggleExpandPerson(${person.global_id})">
                         <div class="person-thumbnail">${thumbHtml}</div>
                         <div class="person-info">
                             <div class="person-top-row">
-                                <span class="color-swatch" style="background: ${person.color_hex}"></span>
+                                <span class="color-swatch" style="background:${person.color_hex}"></span>
                                 <span class="person-id">ID:${idStr}</span>
-                                <span class="hit-count">×${person.hit_count}</span>
-                                <span style="font-size:10px; color:var(--text-muted); margin-left:auto;">${isExpanded ? '▲' : '▼'}</span>
+                                ${followBtnHtml}
+                                <span class="hit-count" style="margin-left:auto;">×${person.hit_count}</span>
+                                <span style="font-size:10px;color:var(--text-muted);margin-left:6px;">${isExpanded ? '▲' : '▼'}</span>
                             </div>
                             <div class="person-meta">${camTags}</div>
                             ${visualHtml}
@@ -995,68 +1295,59 @@
             loggerList.scrollTop = scrollTop;
         }
 
-
-        // ── AI Assistant Drawer Functions ──────────────────────────────────
+        // ── AI Assistant ──────────────────────────────────────────────────────
         function toggleAIDrawer() {
-            const drawer = document.getElementById('aiDrawer');
-            drawer.classList.toggle('hidden');
+            document.getElementById('aiDrawer').classList.toggle('hidden');
         }
 
         function sendQuickPrompt(promptText) {
-            const drawer = document.getElementById('aiDrawer');
-            drawer.classList.remove('hidden');
+            document.getElementById('aiDrawer').classList.remove('hidden');
             document.getElementById('aiInput').value = promptText;
             sendAIPrompt();
         }
 
         async function sendAIPrompt() {
-            const input = document.getElementById('aiInput');
+            const input  = document.getElementById('aiInput');
             const prompt = input.value.trim();
             if (!prompt) return;
 
             const chatBody = document.getElementById('aiChatBody');
-            const sendBtn = document.getElementById('aiSendBtn');
+            const sendBtn  = document.getElementById('aiSendBtn');
 
-            // Append user message bubble
             const userBubble = document.createElement('div');
-            userBubble.className = 'chat-bubble user';
+            userBubble.className   = 'chat-bubble user';
             userBubble.textContent = prompt;
             chatBody.appendChild(userBubble);
 
-            input.value = '';
-            sendBtn.disabled = true;
+            input.value       = '';
+            sendBtn.disabled  = true;
             sendBtn.textContent = 'Thinking...';
 
-            // Append temporary AI thinking bubble
             const aiBubble = document.createElement('div');
-            aiBubble.className = 'chat-bubble ai';
+            aiBubble.className   = 'chat-bubble ai';
             aiBubble.textContent = 'Analyzing tracking logs & vision data…';
             chatBody.appendChild(aiBubble);
             chatBody.scrollTop = chatBody.scrollHeight;
 
             try {
-                const res = await fetch('/api/ai/chat', {
+                const res  = await fetch('/api/ai/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ prompt })
+                    body: JSON.stringify({ prompt }),
                 });
-
                 const data = await res.json();
-                if (data.error) {
-                    aiBubble.textContent = `⚠️ ${data.error}`;
-                } else {
-                    aiBubble.textContent = data.response;
-                }
+                aiBubble.textContent = data.error ? `⚠️ ${data.error}` : data.response;
             } catch (err) {
                 aiBubble.textContent = `❌ Network Error: ${err.message}`;
             } finally {
-                sendBtn.disabled = false;
+                sendBtn.disabled    = false;
                 sendBtn.textContent = 'Send';
-                chatBody.scrollTop = chatBody.scrollHeight;
+                chatBody.scrollTop  = chatBody.scrollHeight;
             }
         }
 
-        // Start SSE connection
+        // ── Boot ──────────────────────────────────────────────────────────────
+        initVideoPlayers();
         connectSSE();
     </script>
 </body>

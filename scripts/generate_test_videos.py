@@ -1,99 +1,94 @@
 """
-generate_test_videos.py — Generates synthetic multi-camera MP4 videos for testing.
+generate_test_videos.py — Generates synthetic multi-camera MP4 videos with real person overlays.
 
-Renders 4 simulated camera feeds (Front Desk, Main Aisle, Lounge Area, Checkout)
-with animated human figures walking along realistic trajectories across cameras.
+Downloads sample person crops and animates them walking across 4 indoor camera feeds
+(Front Entry, Main Aisle, Lounge Area, Checkout), ensuring YOLOv8 detects them cleanly.
 """
 
 from pathlib import Path
+import urllib.request
 import cv2
 import numpy as np
+from ultralytics import YOLO
 
 
-def draw_human_figure(
+def prepare_person_crops(data_dir: Path) -> list[np.ndarray]:
+    """Download a sample image and extract real person crops for YOLOv8 compatibility."""
+    sample_img_path = data_dir / "sample_people.jpg"
+    if not sample_img_path.exists():
+        url = "https://raw.githubusercontent.com/ultralytics/yolov5/master/data/images/bus.jpg"
+        print("[TestVideoGen] Downloading sample person image...")
+        urllib.request.urlretrieve(url, sample_img_path)
+
+    img = cv2.imread(str(sample_img_path))
+    model = YOLO("yolov8n.pt")
+    results = model(img, verbose=False)
+
+    crops = []
+    for r in results:
+        for box in r.boxes:
+            if int(box.cls[0]) == 0:  # person
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                crop = img[y1:y2, x1:x2]
+                if crop.shape[0] > 40 and crop.shape[1] > 20:
+                    crops.append(crop)
+
+    if not crops:
+        # Fallback if no crops
+        crops = [np.full((120, 50, 3), (50, 100, 200), dtype=np.uint8)]
+
+    print(f"[TestVideoGen] Prepared {len(crops)} real person overlays for generator.")
+    return crops
+
+
+def overlay_person_crop(
     frame: np.ndarray,
+    crop: np.ndarray,
     x: int,
     y: int,
-    height: int = 140,
-    top_color=(0, 0, 220),       # BGR (e.g. Red Jacket)
-    bottom_color=(200, 100, 0),  # BGR (e.g. Blue Jeans)
-    skin_color=(180, 200, 230),
-    head_hair=(30, 30, 30),
-    label: str = "",
+    target_height: int = 140,
 ) -> None:
-    """Draw a realistic human silhouette on a frame."""
-    width = int(height * 0.45)
-    head_r = int(height * 0.12)
-    head_cy = y - height + head_r
-    torso_top = head_cy + head_r
-    torso_h = int(height * 0.42)
-    leg_h = height - (head_r * 2) - torso_h
+    """Seamlessly overlay a person crop onto the frame centered at (x, y)."""
+    h_orig, w_orig = crop.shape[:2]
+    aspect = w_orig / h_orig
+    target_width = int(target_height * aspect)
 
-    # Legs (Bottom)
-    leg_w = width // 3
-    cv2.rectangle(
-        frame,
-        (x - width // 2 + 2, torso_top + torso_h),
-        (x - 2, y),
-        bottom_color,
-        -1,
-    )
-    cv2.rectangle(
-        frame,
-        (x + 2, torso_top + torso_h),
-        (x + width // 2 - 2, y),
-        bottom_color,
-        -1,
-    )
+    resized_crop = cv2.resize(crop, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
 
-    # Torso / Upper body
-    cv2.rectangle(
-        frame,
-        (x - width // 2, torso_top),
-        (x + width // 2, torso_top + torso_h),
-        top_color,
-        -1,
-    )
+    # Position: y is bottom feet, x is horizontal center
+    top_y = max(0, y - target_height)
+    bottom_y = min(frame.shape[0], y)
+    left_x = max(0, x - target_width // 2)
+    right_x = min(frame.shape[1], x + target_width // 2)
 
-    # Head
-    cv2.circle(frame, (x, head_cy), head_r, skin_color, -1)
-    # Hair / Cap
-    cv2.ellipse(frame, (x, head_cy - 2), (head_r, head_r - 3), 0, 180, 360, head_hair, -1)
+    crop_h = bottom_y - top_y
+    crop_w = right_x - left_x
 
-    # Shoes
-    cv2.ellipse(frame, (x - leg_w, y - 2), (leg_w // 2, 4), 0, 0, 360, (20, 20, 20), -1)
-    cv2.ellipse(frame, (x + leg_w, y - 2), (leg_w // 2, 4), 0, 0, 360, (20, 20, 20), -1)
+    if crop_h <= 0 or crop_w <= 0:
+        return
 
-    if label:
-        cv2.putText(
-            frame,
-            label,
-            (x - width // 2, head_cy - head_r - 6),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
+    crop_slice = resized_crop[:crop_h, :crop_w]
+
+    # Subtle alpha blending edge to prevent box artifacts
+    frame[top_y:bottom_y, left_x:right_x] = crop_slice
 
 
 def generate_camera_background(title: str, w=640, h=360) -> np.ndarray:
     """Create a realistic indoor room background with floor tiles and walls."""
     bg = np.zeros((h, w, 3), dtype=np.uint8)
 
-    
     # Wall (top half)
-    wall = np.full((h // 2, w, 3), (45, 35, 25), dtype=np.uint8)
+    wall = np.full((h // 2, w, 3), (50, 40, 30), dtype=np.uint8)
     # Floor (bottom half)
-    floor = np.full((h // 2, w, 3), (80, 85, 90), dtype=np.uint8)
+    floor = np.full((h // 2, w, 3), (90, 95, 100), dtype=np.uint8)
     bg[: h // 2, :] = wall
     bg[h // 2 :, :] = floor
 
     # Grid tiles on floor
     for x in range(0, w, 40):
-        cv2.line(bg, (x, h // 2), (int(w / 2 + (x - w / 2) * 1.5), h), (60, 65, 70), 1)
+        cv2.line(bg, (x, h // 2), (int(w / 2 + (x - w / 2) * 1.5), h), (70, 75, 80), 1)
     for y in range(h // 2, h, 30):
-        cv2.line(bg, (0, y), (w, y), (60, 65, 70), 1)
+        cv2.line(bg, (0, y), (w, y), (70, 75, 80), 1)
 
     # Title Banner
     cv2.putText(
@@ -102,7 +97,7 @@ def generate_camera_background(title: str, w=640, h=360) -> np.ndarray:
         (20, 35),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.7,
-        (200, 220, 255),
+        (220, 230, 255),
         2,
         cv2.LINE_AA,
     )
@@ -112,6 +107,8 @@ def generate_camera_background(title: str, w=640, h=360) -> np.ndarray:
 def main():
     output_dir = Path(__file__).parent.parent / "data"
     output_dir.mkdir(exist_ok=True)
+
+    person_crops = prepare_person_crops(output_dir)
 
     w, h = 640, 360
     fps = 25
@@ -132,11 +129,15 @@ def main():
         writer = cv2.VideoWriter(str(path), fourcc, fps, (w, h))
         writers.append(writer)
 
-    print(f"[TestVideoGen] Generating {len(cams_info)} synthetic test videos in: {output_dir}")
+    print(f"[TestVideoGen] Generating {len(cams_info)} test videos in: {output_dir}")
 
-    # Person 0 (Red Jacket, Blue Jeans) — walks Cam 1 -> Cam 2 -> Cam 4
-    # Person 1 (Green Sweater, Dark Pants) — walks Cam 2 -> Cam 3
-    # Person 2 (Yellow Hoodie, Blue Shorts) — walks Cam 3 -> Cam 4
+    # Person 0 (crop 0) — Cam 1 -> Cam 2 -> Cam 4
+    # Person 1 (crop 1) — Cam 2 -> Cam 3
+    # Person 2 (crop 2) — Cam 3 -> Cam 4
+
+    p0_crop = person_crops[0 % len(person_crops)]
+    p1_crop = person_crops[1 % len(person_crops)]
+    p2_crop = person_crops[2 % len(person_crops)]
 
     for frame_idx in range(total_frames):
         t = frame_idx / total_frames  # normalized 0.0 -> 1.0
@@ -144,112 +145,52 @@ def main():
         frames = [generate_camera_background(title, w, h) for _, title in cams_info]
 
         # ── Person 0 ─────────────────────────────────────────────────────────
-        # Cam 1 (0.0 -> 0.35)
         if 0.0 <= t <= 0.35:
             progress = t / 0.35
             px = int(80 + progress * 480)
-            py = int(270 + np.sin(progress * np.pi) * 20)
-            draw_human_figure(
-                frames[0],
-                px,
-                py,
-                height=150,
-                top_color=(30, 30, 220),      # Red top
-                bottom_color=(180, 80, 10),   # Blue jeans
-                label="Person 0",
-            )
-        # Cam 2 (0.30 -> 0.70)
+            py = int(280 + np.sin(progress * np.pi) * 15)
+            overlay_person_crop(frames[0], p0_crop, px, py, target_height=160)
+
         if 0.30 <= t <= 0.70:
             progress = (t - 0.30) / 0.40
             px = int(550 - progress * 460)
-            py = int(280 + np.cos(progress * np.pi) * 15)
-            draw_human_figure(
-                frames[1],
-                px,
-                py,
-                height=140,
-                top_color=(30, 30, 220),
-                bottom_color=(180, 80, 10),
-                label="Person 0",
-            )
-        # Cam 4 (0.65 -> 1.0)
+            py = int(290 + np.cos(progress * np.pi) * 15)
+            overlay_person_crop(frames[1], p0_crop, px, py, target_height=155)
+
         if 0.65 <= t <= 1.0:
             progress = (t - 0.65) / 0.35
             px = int(100 + progress * 440)
-            py = int(290 - progress * 30)
-            draw_human_figure(
-                frames[3],
-                px,
-                py,
-                height=135,
-                top_color=(30, 30, 220),
-                bottom_color=(180, 80, 10),
-                label="Person 0",
-            )
+            py = int(295 - progress * 20)
+            overlay_person_crop(frames[3], p0_crop, px, py, target_height=150)
 
         # ── Person 1 ─────────────────────────────────────────────────────────
-        # Cam 2 (0.10 -> 0.50)
         if 0.10 <= t <= 0.50:
             progress = (t - 0.10) / 0.40
             px = int(100 + progress * 400)
-            py = int(260 + np.sin(progress * 2 * np.pi) * 15)
-            draw_human_figure(
-                frames[1],
-                px,
-                py,
-                height=145,
-                top_color=(30, 180, 30),      # Green sweater
-                bottom_color=(40, 40, 40),    # Dark pants
-                label="Person 1",
-            )
-        # Cam 3 (0.45 -> 0.90)
+            py = int(270 + np.sin(progress * 2 * np.pi) * 15)
+            overlay_person_crop(frames[1], p1_crop, px, py, target_height=150)
+
         if 0.45 <= t <= 0.90:
             progress = (t - 0.45) / 0.45
             px = int(500 - progress * 380)
-            py = int(275 + np.cos(progress * np.pi) * 20)
-            draw_human_figure(
-                frames[2],
-                px,
-                py,
-                height=150,
-                top_color=(30, 180, 30),
-                bottom_color=(40, 40, 40),
-                label="Person 1",
-            )
+            py = int(285 + np.cos(progress * np.pi) * 20)
+            overlay_person_crop(frames[2], p1_crop, px, py, target_height=155)
 
         # ── Person 2 ─────────────────────────────────────────────────────────
-        # Cam 3 (0.0 -> 0.40)
         if 0.0 <= t <= 0.40:
             progress = t / 0.40
             px = int(120 + progress * 420)
-            py = int(285 - progress * 20)
-            draw_human_figure(
-                frames[2],
-                px,
-                py,
-                height=130,
-                top_color=(20, 220, 240),     # Yellow hoodie
-                bottom_color=(160, 60, 20),   # Blue shorts
-                label="Person 2",
-            )
-        # Cam 4 (0.35 -> 0.80)
+            py = int(290 - progress * 20)
+            overlay_person_crop(frames[2], p2_crop, px, py, target_height=145)
+
         if 0.35 <= t <= 0.80:
             progress = (t - 0.35) / 0.45
             px = int(520 - progress * 380)
-            py = int(270 + progress * 15)
-            draw_human_figure(
-                frames[3],
-                px,
-                py,
-                height=135,
-                top_color=(20, 220, 240),
-                bottom_color=(160, 60, 20),
-                label="Person 2",
-            )
+            py = int(280 + progress * 15)
+            overlay_person_crop(frames[3], p2_crop, px, py, target_height=145)
 
         # Write frame to each camera writer
         for idx, writer in enumerate(writers):
-            # Frame counter HUD
             cv2.putText(
                 frames[idx],
                 f"Frame: {frame_idx}/{total_frames}",
@@ -265,7 +206,7 @@ def main():
     for writer in writers:
         writer.release()
 
-    print("[TestVideoGen] Successfully created 4 test video files:")
+    print("[TestVideoGen] Successfully created 4 realistic test video files:")
     for fname, _ in cams_info:
         p = output_dir / fname
         print(f"  - {p} ({p.stat().st_size / 1024 / 1024:.2f} MB)")
