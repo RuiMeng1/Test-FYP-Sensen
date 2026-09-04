@@ -26,3 +26,6 @@ gdown>=4.7.1
 
 # Progress bars
 tqdm>=4.65.0
+
+# Web UI
+flask>=3.0.0

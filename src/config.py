@@ -63,7 +63,7 @@ REID_MAX_EXEMPLARS  = 8      # Max stored appearance vectors per person (front, 
 REID_EMA_ALPHA      = 0.15   # EMA blend factor when refining a near-duplicate exemplar.
                               # Higher = faster adaptation; lower = more stable.
 
-REID_EVERY_N_FRAMES = 5      # Extract Re-ID features every N frames (CPU speed trade-off)
+REID_EVERY_N_FRAMES = 15     # Extract Re-ID features every N frames (CPU speed trade-off)
                               # Lower = more accurate, slower. Increase to 10+ on slow machines.
 
 # Frames before a gallery entry expires (person not seen for this long → ID released).

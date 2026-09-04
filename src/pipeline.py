@@ -31,6 +31,11 @@ from src.detector import Detection
 from src.gallery import GlobalGallery
 from src.reid_model import TransReIDEncoder
 
+# ── Active-person state shared with the web UI ────────────────────────────────
+# Dict of {camera_id: set of global_ids currently visible}.
+# Written by CameraWorkers each frame, read by the Flask server.
+active_ids_by_camera: Dict[int, set] = {}
+
 
 # ── Colour Normalisation ──────────────────────────────────────────────────────
 def normalize_color(image: np.ndarray) -> np.ndarray:
@@ -57,7 +62,14 @@ _PALETTE: List[Tuple[int, int, int]] = [
 ]
 
 def _color(global_id: int) -> Tuple[int, int, int]:
+    """Return the BGR colour for a global ID.  Also used by the web UI."""
     return _PALETTE[global_id % len(_PALETTE)]
+
+
+def get_color_hex(global_id: int) -> str:
+    """Return the CSS hex colour (RGB) for a global ID."""
+    b, g, r = _color(global_id)
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 class CameraWorker:
@@ -86,6 +98,7 @@ class CameraWorker:
         gallery:       GlobalGallery,
         display_queue: Optional[queue.Queue] = None,
         reid_interval: int = 5,
+        tracking_log=None,                  # Optional TrackingLog for review UI
     ):
         self.video_path    = video_path
         self.camera_id     = camera_id
@@ -95,6 +108,7 @@ class CameraWorker:
         self.gallery       = gallery
         self.display_queue = display_queue
         self.reid_interval = reid_interval
+        self.tracking_log  = tracking_log
 
         self.output_path   = OUTPUT_DIR / f"{video_path.stem}_tracked.mp4"
         self.is_done       = False
@@ -147,6 +161,15 @@ class CameraWorker:
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         src_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
         self.total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        # Register camera in the tracking log
+        if self.tracking_log is not None:
+            self.tracking_log.register_camera(
+                self.camera_id, fps=src_fps,
+                total_frames=self.total_frames,
+                video_file=self.output_path.name,
+                raw_video_file=self.video_path.name,
+            )
 
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -261,6 +284,28 @@ class CameraWorker:
 
             # ── Annotate ─────────────────────────────────────────────────────
             annotated = self._draw(frame, detections)
+
+            # ── Update active-person state ─────────────────────────────────────
+            visible_gids = set()
+            for det in detections:
+                gid = self._id_cache.get(det.local_id, -1)
+                if gid >= 0:
+                    visible_gids.add(gid)
+            active_ids_by_camera[self.camera_id] = visible_gids
+
+            # ── Record in tracking log ────────────────────────────────────────
+            if self.tracking_log is not None:
+                self.tracking_log.record_frame(
+                    self.camera_id, self.frame_idx, visible_gids
+                )
+                frame_dets = []
+                for det in detections:
+                    gid = self._id_cache.get(det.local_id, -1)
+                    if gid >= 0:
+                        frame_dets.append((gid, [int(v) for v in det.bbox]))
+                self.tracking_log.record_detections(
+                    self.camera_id, self.frame_idx, frame_dets
+                )
 
             # ── Write to file ─────────────────────────────────────────────────
             writer.write(annotated)
