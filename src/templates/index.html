@@ -499,7 +499,60 @@
             font-weight: 500;
         }
 
+        .person-card {
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .person-card:hover {
+            border-color: var(--person-color, var(--accent-green));
+            transform: translateY(-1px);
+        }
+
+        .camera-card.focused {
+            border: 2px solid var(--accent-green) !important;
+            box-shadow: 0 0 20px var(--accent-green-glow) !important;
+        }
+
+        .timeline-drawer {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255,255,255,0.08);
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .timeline-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 11px;
+            background: rgba(15, 23, 42, 0.6);
+            padding: 4px 8px;
+            border-radius: 6px;
+            color: var(--text-secondary);
+            cursor: pointer;
+        }
+
+        .timeline-item:hover {
+            background: rgba(59, 130, 246, 0.2);
+            color: white;
+        }
+
+        .visual-attr-badge {
+            margin-top: 6px;
+            font-size: 11px;
+            line-height: 1.35;
+            color: #cbd5e1;
+            background: rgba(30, 41, 59, 0.7);
+            padding: 6px 8px;
+            border-radius: 6px;
+            border-left: 2px solid var(--person-color, #10b981);
+        }
+
         /* ── Loading shimmer ───────────────────────────────────── */
+
         @keyframes shimmer {
             0% { background-position: -200% 0; }
             100% { background-position: 200% 0; }
@@ -712,8 +765,9 @@
             <div class="camera-panel">
                 <div class="camera-grid">
                     {% for cam_id in camera_ids %}
-                    <div class="camera-card">
+                    <div class="camera-card" data-cam-id="{{ cam_id }}">
                         <img src="/video_feed/{{ cam_id }}" alt="Camera {{ cam_id }}" loading="eager">
+
                         <div class="camera-label">
                             <span class="camera-label-dot"></span>
                             Cam {{ cam_id }}
@@ -826,7 +880,34 @@
             };
         }
 
+        const expandedGids = new Set();
+
+        function toggleExpandPerson(gid) {
+            if (expandedGids.has(gid)) {
+                expandedGids.delete(gid);
+            } else {
+                expandedGids.add(gid);
+            }
+            // Trigger quick re-render if cached data exists
+            if (window.lastPersonsData) {
+                renderPersons(window.lastPersonsData.persons, window.lastPersonsData.total_tracked);
+            }
+        }
+
+        function focusCamera(camId) {
+            document.querySelectorAll('.camera-card').forEach(card => {
+                card.classList.remove('focused');
+            });
+            const target = document.querySelector(`.camera-card[data-cam-id="${camId}"]`);
+            if (target) {
+                target.classList.add('focused');
+                target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+        }
+
         function renderPersons(persons, totalTracked) {
+            window.lastPersonsData = { persons, total_tracked: totalTracked };
+
             // Update counters
             personCount.textContent = totalTracked;
             statusTracked.textContent = totalTracked;
@@ -855,6 +936,7 @@
             for (const person of persons) {
                 const activeClass = person.is_active ? 'active' : 'inactive';
                 const idStr = String(person.global_id).padStart(3, '0');
+                const isExpanded = expandedGids.has(person.global_id);
 
                 // Thumbnail
                 const thumbHtml = person.thumbnail_b64
@@ -862,34 +944,49 @@
                     : `<span class="no-thumb">👤</span>`;
 
                 // Camera tags (all cameras ever seen)
-                const camTags = person.cameras_seen.map(c => {
-                    const isActiveCam = person.active_cameras.includes(c);
-                    return `<span class="cam-tag${isActiveCam ? ' active-cam' : ''}">Cam ${c}</span>`;
+                const camTags = (person.cameras_seen || []).map(c => {
+                    return `<span class="cam-tag active-cam" onclick="event.stopPropagation(); focusCamera(${c})">Cam ${c}</span>`;
                 }).join('');
 
-                // Active cameras indicator
-                const activeCamsHtml = person.active_cameras.length > 0
-                    ? person.active_cameras.map(c => `<span class="cam-tag active-cam">Cam ${c}</span>`).join('')
+                // Visual attributes badge
+                const visualHtml = person.visual_attributes
+                    ? `<div class="visual-attr-badge">💬 ${person.visual_attributes}</div>`
                     : '';
 
+                // Appearance timeline drawer
+                let timelineHtml = '';
+                if (isExpanded && person.appearances && person.appearances.length > 0) {
+                    const items = person.appearances.map(a => {
+                        const tStart = a.first_timestamp || '0:00';
+                        const tEnd = a.last_timestamp || '0:00';
+                        const dur = a.duration_seconds || 0;
+                        return `
+                            <div class="timeline-item" onclick="event.stopPropagation(); focusCamera(${a.camera_id})">
+                                <span>📷 Cam ${a.camera_id}</span>
+                                <span>⏱️ ${tStart} ➔ ${tEnd} (${dur}s)</span>
+                            </div>`;
+                    }).join('');
+
+                    timelineHtml = `
+                        <div class="timeline-drawer">
+                            <div style="font-size:11px; font-weight:600; color:var(--text-muted);">APPEARANCE TIMELINE</div>
+                            ${items}
+                        </div>`;
+                }
+
                 html += `
-                    <div class="person-card ${activeClass}" style="--person-color: ${person.color_hex}">
+                    <div class="person-card ${activeClass}" style="--person-color: ${person.color_hex}" onclick="toggleExpandPerson(${person.global_id})">
                         <div class="person-thumbnail">${thumbHtml}</div>
                         <div class="person-info">
                             <div class="person-top-row">
                                 <span class="color-swatch" style="background: ${person.color_hex}"></span>
                                 <span class="person-id">ID:${idStr}</span>
-                                <span class="live-badge">
-                                    <span class="live-badge-dot"></span>
-                                    LIVE
-                                </span>
                                 <span class="hit-count">×${person.hit_count}</span>
+                                <span style="font-size:10px; color:var(--text-muted); margin-left:auto;">${isExpanded ? '▲' : '▼'}</span>
                             </div>
                             <div class="person-meta">${camTags}</div>
-                            <div class="active-cameras">
-                                <span class="active-cameras-label">📷</span>
-                                ${activeCamsHtml}
-                            </div>
+                            ${visualHtml}
+                            ${timelineHtml}
                         </div>
                     </div>`;
             }
@@ -897,6 +994,7 @@
             loggerList.innerHTML = html;
             loggerList.scrollTop = scrollTop;
         }
+
 
         // ── AI Assistant Drawer Functions ──────────────────────────────────
         function toggleAIDrawer() {

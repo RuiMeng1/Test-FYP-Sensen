@@ -122,7 +122,9 @@ def persons_sse():
                             "is_active": True,
                             "thumbnail_b64": pinfo.get("thumbnail_b64"),
                             "visual_attributes": pinfo.get("visual_attributes"),
+                            "appearances": pinfo.get("appearances", []),
                         })
+
 
                 except Exception as e:
                     yield f"data: {json.dumps({'error': str(e)})}\n\n"
