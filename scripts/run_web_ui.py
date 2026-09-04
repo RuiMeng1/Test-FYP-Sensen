@@ -52,8 +52,49 @@ def index():
     return render_template("index.html", camera_ids=sorted(camera_ids))
 
 
+@app.route("/video_feed/<int:cam_id>")
+def video_feed(cam_id: int):
+    """Streams MJPEG frames from the tracked video files in output/."""
+    import cv2
+    import time
+
+    def generate_frames():
+        # Find matching tracked video in output/
+        video_candidates = list(OUTPUT_DIR.glob(f"cam{cam_id}_*tracked.mp4")) + list(OUTPUT_DIR.glob(f"*cam{cam_id}*tracked.mp4"))
+        if not video_candidates:
+            video_candidates = sorted(OUTPUT_DIR.glob("*.mp4"))
+
+        if not video_candidates:
+            return
+
+        video_path = str(video_candidates[0])
+
+        while True:
+            cap = cv2.VideoCapture(video_path)
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                ret, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                if ret:
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n"
+                        + jpeg.tobytes()
+                        + b"\r\n"
+                    )
+                time.sleep(0.04)  # ~25 fps cap
+            cap.release()
+
+    return Response(
+        generate_frames(),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
 @app.route("/api/persons")
 def persons_sse():
+
     """Yields SSE stream reading from tracking_log.json for the review dashboard."""
     import time
 
@@ -77,11 +118,12 @@ def persons_sse():
                             "color_hex": get_color_hex(gid),
                             "hit_count": pinfo.get("total_detections", 0),
                             "cameras_seen": cams_seen,
-                            "active_cameras": [],
-                            "is_active": False,
+                            "active_cameras": cams_seen,
+                            "is_active": True,
                             "thumbnail_b64": pinfo.get("thumbnail_b64"),
                             "visual_attributes": pinfo.get("visual_attributes"),
                         })
+
                 except Exception as e:
                     yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
