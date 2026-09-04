@@ -177,11 +177,16 @@ def main() -> None:
     # ── Phase 2: Open review UI ───────────────────────────────────────────────
     if show_preview:
         print("[Main] Opening review dashboard …\n")
-        tracking_data = TrackingLog.load(str(log_path))
+        try:
+            from src.review_ui import ReviewUI
+            ui = ReviewUI(tracking_data=tracking_data, output_dir=str(OUTPUT_DIR))
+            ui.run()
+        except (ImportError, ModuleNotFoundError) as e:
+            print(f"[Main] Note: Tkinter desktop UI unavailable ({e}).")
+            print(f"[Main] ✦ To open the Web Review Dashboard & OpenAI AI Assistant, run:\n")
+            print(f"       python scripts/run_web_ui.py\n")
 
-        from src.review_ui import ReviewUI
-        ui = ReviewUI(tracking_data=tracking_data, output_dir=str(OUTPUT_DIR))
-        ui.run()
+
 
 
 if __name__ == "__main__":
