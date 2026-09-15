@@ -721,6 +721,7 @@ class ReviewUI:
         if tab == "logger":
             self._ai_container.pack_forget()
             self._logger_container.pack(fill=tk.BOTH, expand=True)
+            self._rebuild_cards()
             self._sidebar_logger_btn.configure(bg=ACCENT_BLUE, fg="white")
             self._sidebar_ai_btn.configure(bg="#1e293b", fg=TEXT_SECONDARY)
             self._tab_ai_btn.configure(bg="#1e293b", fg=TEXT_SECONDARY)
@@ -1846,6 +1847,7 @@ class ReviewUI:
     # ── Sidebar Person Cards ──────────────────────────────────────────────────
 
     def _build_person_cards(self) -> None:
+        self._logger_cards = {}
         for widget in self._person_list_frame.winfo_children():
             widget.destroy()
         self._thumb_refs.clear()
@@ -1926,34 +1928,34 @@ class ReviewUI:
         )
         id_label.pack(side=tk.LEFT)
 
-        tk.Label(
+        count_label = tk.Label(
             row1, text=f"×{person.get('total_detections', 0)}",
             bg=bg, fg=TEXT_MUTED, font=("Menlo", 10)
-        ).pack(side=tk.RIGHT)
+        )
+        count_label.pack(side=tk.RIGHT)
 
-        if is_active or is_tracked:
-            row2 = tk.Frame(info, bg=bg, cursor="hand2")
-            row2.pack(fill=tk.X, pady=(2, 0))
-
-            if is_active:
-                live_frame = tk.Frame(row2, bg="#134e2e", bd=0)
-                live_frame.pack(side=tk.LEFT, padx=(0, 4))
-                tk.Label(
-                    live_frame, text=f" ● LIVE (Cam {active_cam}) ",
-                    bg="#134e2e", fg=ACCENT_GREEN,
-                    font=("Menlo", 8, "bold"), padx=2, pady=1
-                ).pack()
-
-            if is_tracked:
-                track_badge = tk.Label(
-                    row2, text=" FOLLOWING ",
-                    bg="#312e81", fg=BORDER_TRACKED,
-                    font=("Menlo", 8, "bold"), padx=4, pady=1
-                )
-                track_badge.pack(side=tk.LEFT)
+        # Reserve badge space so arrivals do not shift every card below them.
+        row2 = tk.Frame(info, bg=bg, cursor="hand2", height=22)
+        row2.pack(fill=tk.X, pady=(2, 0))
+        row2.pack_propagate(False)
+        live_badge = tk.Label(
+            row2, bg="#134e2e", fg=ACCENT_GREEN,
+            font=("Menlo", 8, "bold"), padx=2, pady=1,
+        )
+        track_badge = tk.Label(
+            row2, text=" FOLLOWING ", bg="#312e81", fg=BORDER_TRACKED,
+            font=("Menlo", 8, "bold"), padx=4, pady=1,
+        )
 
         cam_row = tk.Frame(info, bg=bg, cursor="hand2")
         cam_row.pack(fill=tk.X, pady=(3, 0))
+        self._logger_cards[gid] = {
+            "outer": outer, "thumb_frame": thumb_frame,
+            "backgrounds": [card, main_row, expand_label, info, row1,
+                            id_label, count_label, row2, cam_row],
+            "live": live_badge, "following": track_badge, "state": None,
+        }
+        self._refresh_logger_card(gid)
         for c in person.get("cameras_seen", []):
             tk.Label(
                 cam_row, text=f" Cam {c} ", bg="#1e293b", fg=TEXT_MUTED,
@@ -2015,7 +2017,37 @@ class ReviewUI:
         self._build_person_cards()
 
     def _rebuild_cards(self) -> None:
-        self._build_person_cards()
+        if set(getattr(self, "_logger_cards", {})) != set(self.persons):
+            self._build_person_cards()
+        else:
+            for gid in self.persons:
+                self._refresh_logger_card(gid)
+
+    def _refresh_logger_card(self, gid: int) -> None:
+        """Update only a changed card's badges and colors; retain its image."""
+        widgets = self._logger_cards[gid]
+        camera = self._get_person_current_camera(gid, self._current_frame)
+        tracked = self._tracked_gid == gid
+        state = (camera, tracked)
+        if widgets["state"] == state:
+            return
+        widgets["state"] = state
+        border, background = (
+            (BORDER_TRACKED, BG_TRACKED) if tracked else
+            (ACCENT_GREEN, BG_ACTIVE) if camera is not None else
+            (BORDER, BG_CARD)
+        )
+        widgets["outer"].configure(bg=border)
+        widgets["thumb_frame"].configure(bg=border)
+        for widget in widgets["backgrounds"]:
+            widget.configure(bg=background)
+        widgets["live"].pack_forget()
+        widgets["following"].pack_forget()
+        if camera is not None:
+            widgets["live"].configure(text=f" ● LIVE (Cam {camera}) ")
+            widgets["live"].pack(side=tk.LEFT, padx=(0, 4))
+        if tracked:
+            widgets["following"].pack(side=tk.LEFT)
 
     # ── Playback Controls ─────────────────────────────────────────────────────
 
@@ -2044,6 +2076,7 @@ class ReviewUI:
         self._set_seek_slider(frame_idx)
         self._handle_auto_tracking()
         self._update_display()
+        self._rebuild_cards()
 
     def _set_seek_slider(self, frame_idx: int) -> None:
         """Update the slider without treating playback as a user seek."""
