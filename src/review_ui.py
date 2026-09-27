@@ -1,14 +1,14 @@
 """
 review_ui.py — Post-processing review dashboard for multi-camera person tracking.
 
-Opens after processing is complete (or via --review-only). Loads the annotated
-output videos and tracking_log.json, providing:
+Opens after processing is complete (or via --review-only / python -m src.review_ui).
+Loads the annotated output videos and tracking_log.json, providing:
   - Video playback with play/pause, frame stepping, and seek slider
   - Person logger with expandable per-person appearance timelines
-  - Auto-tracking mode: click any Person ID to full-screen their current camera
-    and automatically follow them across cameras as they move
-  - Auto-detection wait: if person is not live, waits for detection and auto full-screens
-  - Manual camera view switching: Grid View, Cam 1, Cam 2, Cam 3 buttons + double click
+  - Auto-tracking mode: click any Person ID to follow across cameras
+  - View switching: Grid View, individual camera full-screen buttons
+  - NEW: "People Gallery" section with photos, statistics, and interactive
+    manual merging of two IDs together with live persistence.
 
 Runs on the main thread (macOS Cocoa/Tk requirement).
 """
@@ -20,12 +20,19 @@ import io
 import json
 import time
 import tkinter as tk
+from datetime import datetime
+from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageFont, ImageTk
+
+from src.ai_assistant import AIAssistant, parse_camera_timestamp, parse_person_ids
+
+# Path to application logo asset
+_LOGO_PATH = Path(__file__).parent / "assets" / "sensen_logo.png"
 
 
 # ── Colour constants ─────────────────────────────────────────────────────────
@@ -35,9 +42,11 @@ BG_CARD        = "#151d2e"
 BG_ACTIVE      = "#0d2818"
 BG_EXPANDED    = "#0f1729"
 BG_TRACKED     = "#1e1b4b"
+BG_MERGE_SRC   = "#451a03"
 BORDER         = "#1e293b"
 BORDER_ACTIVE  = "#10b981"
 BORDER_TRACKED = "#38bdf8"
+BORDER_MERGE   = "#f59e0b"
 
 TEXT_PRIMARY   = "#f1f5f9"
 TEXT_SECONDARY = "#94a3b8"
@@ -46,11 +55,69 @@ ACCENT_GREEN   = "#10b981"
 ACCENT_BLUE    = "#3b82f6"
 ACCENT_RED     = "#ef4444"
 ACCENT_YELLOW  = "#f59e0b"
+ACCENT_PURPLE  = "#8b5cf6"
+
+
+class ProfessionalButton(ttk.Button):
+    """Theme-aware button that translates the legacy colour API to ttk styles."""
+
+    _STYLE_BY_BACKGROUND = {
+        ACCENT_BLUE: "Sensen.Primary.TButton",
+        "#2563eb": "Sensen.Primary.TButton",
+        ACCENT_PURPLE: "Sensen.AI.TButton",
+        "#1e1b4b": "Sensen.AI.TButton",
+        ACCENT_GREEN: "Sensen.Success.TButton",
+        "#065f46": "Sensen.Success.TButton",
+        "#ef4444": "Sensen.Danger.TButton",
+        "#dc2626": "Sensen.Danger.TButton",
+    }
+
+    def __init__(self, master=None, **kwargs):
+        style, padding = self._consume_legacy_style(kwargs)
+        kwargs.setdefault("style", style)
+        kwargs.setdefault("padding", padding)
+        super().__init__(master, **kwargs)
+
+    @classmethod
+    def _consume_legacy_style(cls, options: dict) -> Tuple[str, Tuple[int, int]]:
+        background = options.pop("bg", options.pop("background", None))
+        foreground = options.pop("fg", options.pop("foreground", None))
+        options.pop("activebackground", None)
+        options.pop("activeforeground", None)
+        options.pop("bd", None)
+        options.pop("borderwidth", None)
+        options.pop("relief", None)
+        options.pop("font", None)
+        padx = int(options.pop("padx", 10))
+        pady = int(options.pop("pady", 5))
+
+        if foreground == ACCENT_YELLOW:
+            style = "Sensen.Warning.TButton"
+        else:
+            style = cls._STYLE_BY_BACKGROUND.get(
+                background, "Sensen.Secondary.TButton"
+            )
+        return style, (padx, pady)
+
+    def configure(self, cnf=None, **kwargs):
+        if cnf is not None:
+            if not isinstance(cnf, dict):
+                return super().configure(cnf, **kwargs)
+            kwargs.update(cnf)
+        if any(
+            key in kwargs
+            for key in ("bg", "background", "fg", "foreground", "activebackground", "activeforeground")
+        ):
+            style, _ = self._consume_legacy_style(kwargs)
+            kwargs["style"] = style
+        return super().configure(**kwargs)
+
+    config = configure
 
 
 class ReviewUI:
     """
-    Post-processing review dashboard.
+    Post-processing review dashboard with interactive People Gallery & ID Merging.
 
     Parameters
     ----------
@@ -64,10 +131,10 @@ class ReviewUI:
 
         # Camera metadata
         self.cameras: Dict[int, dict] = {
-            int(k): v for k, v in tracking_data["cameras"].items()
+            int(k): v for k, v in tracking_data.get("cameras", {}).items()
         }
         self.persons: Dict[int, dict] = {
-            int(k): v for k, v in tracking_data["persons"].items()
+            int(k): v for k, v in tracking_data.get("persons", {}).items()
         }
 
         # Video captures
@@ -79,24 +146,41 @@ class ReviewUI:
         self._current_frame = 0
         self._max_frame = 0
         self._playback_fps = 25.0
+        self._updating_seek_slider = False
+        self._last_active_signature: Optional[Tuple[Tuple[int, int], ...]] = None
 
-        # View switching state
+        # Normal playback uses the annotated videos. Raw frames only need to be
+        # redrawn while filtering to one person or after an in-app ID merge.
+        self._requires_dynamic_overlays = False
+
+        # View state
+        self._main_section = "video"              # "video" or "gallery"
         self._view_mode = "grid"                  # "grid" or "single"
         self._selected_cam: Optional[int] = None  # Camera shown in single mode
         self._tracked_gid: Optional[int] = None   # Person ID currently being followed
 
+        # Merge state
+        self._merge_source_gid: Optional[int] = None
+
         # PhotoImage references (prevent GC)
         self._photo_refs: Dict[int, ImageTk.PhotoImage] = {}
         self._thumb_refs: Dict[int, ImageTk.PhotoImage] = {}
+        self._gallery_thumb_refs: Dict[int, ImageTk.PhotoImage] = {}
+        self._ai_evidence_refs: List[ImageTk.PhotoImage] = []
 
-        # Expanded person cards
+        # Expanded person cards in sidebar
         self._expanded: Set[int] = set()
+
+        # AI Assistant engine & state
+        self.ai_assistant = AIAssistant(self.tracking_data, self.output_dir)
+        self._sidebar_mode = "logger"             # "logger" or "ai"
+        self._pending_ai_query: Optional[str] = None
 
         # UI references
         self._cam_cards: Dict[int, tk.Frame] = {}
         self._cam_labels: Dict[int, tk.Label] = {}
         self._cam_overlays: Dict[int, tk.Label] = {}
-        self._cam_view_btns: Dict[str, tk.Button] = {}
+        self._cam_view_btns: Dict[str, ProfessionalButton] = {}
 
         # Raw video captures & per-frame detections
         self.detections: Dict[str, Dict[str, List[dict]]] = tracking_data.get("detections", {})
@@ -136,7 +220,6 @@ class ReviewUI:
                 else:
                     print(f"[ReviewUI] Warning: Could not open {video_path}")
             elif cam_id in self._raw_caps:
-                # If only raw video exists
                 cap = self._raw_caps[cam_id]
                 total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 self._max_frame = max(self._max_frame, total - 1)
@@ -146,18 +229,26 @@ class ReviewUI:
                 print(f"[ReviewUI] Warning: Video not found: {video_path}")
 
     def _read_frame(self, cam_id: int, frame_idx: int) -> Optional[np.ndarray]:
-        """Read a specific frame from video and dynamically draw filtered bounding boxes."""
+        """Read a frame efficiently, redrawing overlays only when necessary."""
         raw_cap = self._raw_caps.get(cam_id)
         cam_dets_map = self.detections.get(str(cam_id), {})
         frame_dets = cam_dets_map.get(str(frame_idx), [])
 
-        # If raw clean video and per-frame detections are available:
+        # Ordinary review uses the already-annotated output. This avoids doing
+        # Python box drawing for every camera on every frame in grid mode.
+        needs_dynamic_overlay = (
+            self._tracked_gid is not None or self._requires_dynamic_overlays
+        )
+        if not needs_dynamic_overlay:
+            cap = self._caps.get(cam_id)
+            if cap is not None:
+                return self._read_capture_frame(cap, frame_idx)
+
+        # Filtering to one person and post-merge labels require raw frames.
         if raw_cap is not None and self.detections:
-            raw_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret, frame = raw_cap.read()
-            if ret and frame is not None:
+            frame = self._read_capture_frame(raw_cap, frame_idx)
+            if frame is not None:
                 frame_copy = frame.copy()
-                # If following a specific person, ONLY show their bounding box & ID
                 if self._tracked_gid is not None:
                     to_draw = [d for d in frame_dets if d.get("gid") == self._tracked_gid]
                 else:
@@ -171,9 +262,16 @@ class ReviewUI:
         cap = self._caps.get(cam_id)
         if cap is None:
             return None
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        return self._read_capture_frame(cap, frame_idx)
+
+    @staticmethod
+    def _read_capture_frame(cap: cv2.VideoCapture, frame_idx: int) -> Optional[np.ndarray]:
+        """Read sequentially during playback; seek only after a real timeline jump."""
+        next_frame = int(round(cap.get(cv2.CAP_PROP_POS_FRAMES)))
+        if next_frame != frame_idx:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ret, frame = cap.read()
-        return frame if ret else None
+        return frame if ret and frame is not None else None
 
     def _draw_detection_box(self, frame: np.ndarray, gid: int, bbox: List[int]) -> None:
         """Draw bounding box and ID label on a clean frame."""
@@ -208,35 +306,87 @@ class ReviewUI:
 
     def _build_ui(self) -> None:
         self.root = tk.Tk()
-        self.root.title("Sensen — Review Dashboard")
+        self.root.title("Sensen — Multi-Camera Review & People Gallery")
         self.root.configure(bg=BG_PRIMARY)
+        self._configure_widget_styles()
         self.root.minsize(1200, 750)
 
-        # Default window size
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
-        win_w = min(1500, screen_w - 80)
-        win_h = min(950, screen_h - 80)
+        win_w = min(1520, screen_w - 60)
+        win_h = min(960, screen_h - 60)
         x = (screen_w - win_w) // 2
         y = (screen_h - win_h) // 2
         self.root.geometry(f"{win_w}x{win_h}+{x}+{y}")
 
         # ── Header ────────────────────────────────────────────────────────────
-        header = tk.Frame(self.root, bg="#0f172a", height=48)
+        header = tk.Frame(self.root, bg="#0f172a", height=50)
         header.pack(fill=tk.X, side=tk.TOP)
         header.pack_propagate(False)
 
-        logo = tk.Label(
-            header, text=" S ", bg=ACCENT_BLUE, fg="white",
-            font=("Helvetica", 12, "bold"), padx=4, pady=2
-        )
-        logo.pack(side=tk.LEFT, padx=(16, 8), pady=8)
+        # Logo image
+        try:
+            from PIL import Image, ImageTk
+            _pil = Image.open(_LOGO_PATH)
+            # Scale to fit header height with a bit of padding
+            logo_h = 36
+            ratio  = logo_h / _pil.height
+            logo_w = int(_pil.width * ratio)
+            _pil   = _pil.resize((logo_w, logo_h), Image.LANCZOS)
+            self._logo_photo = ImageTk.PhotoImage(_pil)  # keep reference
+            logo_label = tk.Label(
+                header, image=self._logo_photo,
+                bg="#0f172a", bd=0
+            )
+            logo_label.pack(side=tk.LEFT, padx=(16, 20), pady=7)
+        except Exception as _e:
+            # Fallback to text badge if image fails to load
+            tk.Label(
+                header, text=" S ", bg=ACCENT_BLUE, fg="white",
+                font=("Helvetica", 12, "bold"), padx=5, pady=2
+            ).pack(side=tk.LEFT, padx=(16, 8), pady=8)
+            tk.Label(
+                header, text="Sensen Dashboard",
+                bg="#0f172a", fg=TEXT_PRIMARY,
+                font=("Helvetica", 14, "bold")
+            ).pack(side=tk.LEFT, pady=8, padx=(0, 20))
+            print(f"[ReviewUI] Warning: could not load logo: {_e}")
 
-        tk.Label(
-            header, text="Sensen — Review Dashboard",
-            bg="#0f172a", fg=TEXT_PRIMARY,
-            font=("Helvetica", 15, "bold")
-        ).pack(side=tk.LEFT, pady=8)
+        # ── Section Navigation Tabs ───────────────────────────────────────────
+        nav_frame = tk.Frame(header, bg="#0f172a")
+        nav_frame.pack(side=tk.LEFT, pady=6)
+
+        tab_style = {
+            "font": ("Helvetica", 11, "bold"),
+            "bd": 0, "cursor": "hand2", "padx": 14, "pady": 4
+        }
+
+        self._tab_video_btn = ProfessionalButton(
+            nav_frame, text="Cameras & Playback",
+            command=self._show_video_section,
+            bg=ACCENT_BLUE, fg="white",
+            activebackground="#2563eb", activeforeground="white",
+            **tab_style
+        )
+        self._tab_video_btn.pack(side=tk.LEFT, padx=3)
+
+        self._tab_gallery_btn = ProfessionalButton(
+            nav_frame, text=f"People Gallery ({len(self.persons)})",
+            command=self._show_gallery_section,
+            bg="#1e293b", fg=TEXT_SECONDARY,
+            activebackground="#334155", activeforeground="white",
+            **tab_style
+        )
+        self._tab_gallery_btn.pack(side=tk.LEFT, padx=3)
+
+        self._tab_ai_btn = ProfessionalButton(
+            nav_frame, text="AI Assistant",
+            command=self._open_ai_assistant,
+            bg="#1e293b", fg=TEXT_SECONDARY,
+            activebackground="#334155", activeforeground="white",
+            **tab_style
+        )
+        self._tab_ai_btn.pack(side=tk.LEFT, padx=3)
 
         self._time_label = tk.Label(
             header, text="0:00 / 0:00",
@@ -245,36 +395,20 @@ class ReviewUI:
         )
         self._time_label.pack(side=tk.RIGHT, padx=16, pady=8)
 
-        # ── Main content ──────────────────────────────────────────────────────
-        self._content = tk.Frame(self.root, bg=BG_PRIMARY)
-        self._content.pack(fill=tk.BOTH, expand=True)
+        # ── Main container ────────────────────────────────────────────────────
+        self._content_root = tk.Frame(self.root, bg=BG_PRIMARY)
+        self._content_root.pack(fill=tk.BOTH, expand=True)
 
-        # Right: Logger panel (docked first on right so it never gets cut off)
-        logger_panel = tk.Frame(self._content, bg=BG_SECONDARY, width=420)
-        logger_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=8)
-        logger_panel.pack_propagate(False)
-        self._build_logger(logger_panel)
+        # 1. Video Playback Section View
+        self._video_section_frame = tk.Frame(self._content_root, bg=BG_PRIMARY)
+        self._build_video_section(self._video_section_frame)
 
-        # Left: Camera feeds + View Switcher + Playback controls
-        left_panel = tk.Frame(self._content, bg=BG_PRIMARY)
-        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # 2. People Gallery Section View
+        self._gallery_section_frame = tk.Frame(self._content_root, bg=BG_PRIMARY)
+        self._build_gallery_section(self._gallery_section_frame)
 
-        # View Switcher Bar (above camera view)
-        self._build_view_switcher(left_panel)
-
-        # Camera grid / single container
-        self._camera_frame = tk.Frame(left_panel, bg=BG_PRIMARY)
-        self._camera_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 4))
-
-        # Playback controls
-        controls = tk.Frame(left_panel, bg="#0f172a", height=56)
-        controls.pack(fill=tk.X, padx=8, pady=(0, 8))
-        controls.pack_propagate(False)
-        self._build_controls(controls)
-
-        # ── Build Camera Tiles ────────────────────────────────────────────────
-        self._build_camera_tiles()
-        self._apply_view_layout()
+        # Initially show video section
+        self._show_video_section()
 
         # ── Status bar ────────────────────────────────────────────────────────
         status_bar = tk.Frame(self.root, bg="#0f172a", height=32)
@@ -283,19 +417,115 @@ class ReviewUI:
 
         self._status_label = tk.Label(
             status_bar,
-            text=f"  {len(self.persons)} persons tracked  •  {self._n_cameras} cameras  •  {self._max_frame + 1} frames",
+            text=f"  {len(self.persons)} unique persons  •  {self._n_cameras} cameras  •  {self._max_frame + 1} frames",
             bg="#0f172a", fg=TEXT_MUTED, font=("Menlo", 10),
             anchor="w"
         )
         self._status_label.pack(side=tk.LEFT, padx=12, pady=4)
 
         tk.Label(
-            status_bar, text="Click Person to Auto-Follow  •  Double-Click Camera to Expand",
-            bg="#0f172a", fg="#475569", font=("Helvetica", 10)
+            status_bar, text="People Gallery: Click 'Merge into...' to combine duplicate IDs",
+            bg="#0f172a", fg="#64748b", font=("Helvetica", 10)
         ).pack(side=tk.RIGHT, padx=16, pady=4)
 
+    def _configure_widget_styles(self) -> None:
+        """Configure a consistent cross-platform dark component palette."""
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        button_variants = {
+            "Secondary": ("#243044", "#e2e8f0", "#334155", "#182235"),
+            "Primary": ("#2563eb", "#ffffff", "#3b82f6", "#1d4ed8"),
+            "AI": ("#7c3aed", "#ffffff", "#8b5cf6", "#6d28d9"),
+            "Success": ("#059669", "#ffffff", "#10b981", "#047857"),
+            "Danger": ("#dc2626", "#ffffff", "#ef4444", "#b91c1c"),
+            "Warning": ("#b45309", "#fff7ed", "#d97706", "#92400e"),
+        }
+        for name, (background, foreground, hover, pressed) in button_variants.items():
+            style_name = f"Sensen.{name}.TButton"
+            style.configure(
+                style_name,
+                background=background,
+                foreground=foreground,
+                borderwidth=0,
+                focusthickness=0,
+                focuscolor=background,
+                anchor="center",
+                font=("Helvetica Neue", 10, "bold"),
+            )
+            style.map(
+                style_name,
+                background=[
+                    ("disabled", "#182235"),
+                    ("pressed", pressed),
+                    ("active", hover),
+                ],
+                foreground=[("disabled", "#64748b")],
+            )
+
+    # ── Section Switching ─────────────────────────────────────────────────────
+
+    def _show_video_section(self) -> None:
+        """Switch view to the multi-camera video playback section."""
+        self._main_section = "video"
+        self._gallery_section_frame.pack_forget()
+        self._video_section_frame.pack(fill=tk.BOTH, expand=True)
+
+        self._tab_video_btn.configure(bg=ACCENT_BLUE, fg="white")
+        self._tab_gallery_btn.configure(bg="#1e293b", fg=TEXT_SECONDARY)
+        if getattr(self, "_sidebar_mode", "logger") == "ai":
+            self._tab_ai_btn.configure(bg=ACCENT_PURPLE, fg="white")
+        else:
+            self._tab_ai_btn.configure(bg="#1e293b", fg=TEXT_SECONDARY)
+        self._update_display()
+
+    def _show_gallery_section(self) -> None:
+        """Switch view to the People Gallery grid section."""
+        self._main_section = "gallery"
+        self._video_section_frame.pack_forget()
+        self._gallery_section_frame.pack(fill=tk.BOTH, expand=True)
+
+        self._tab_video_btn.configure(bg="#1e293b", fg=TEXT_SECONDARY)
+        self._tab_gallery_btn.configure(bg=ACCENT_BLUE, fg="white")
+        self._tab_ai_btn.configure(bg="#1e293b", fg=TEXT_SECONDARY)
+        self._rebuild_gallery_grid()
+
+    def _open_ai_assistant(self) -> None:
+        """Top navigation shortcut to open the AI Assistant sidebar tab."""
+        if self._main_section != "video":
+            self._show_video_section()
+        self._show_sidebar_tab("ai")
+
+    # ── Video Section Construction ────────────────────────────────────────────
+
+    def _build_video_section(self, parent: tk.Frame) -> None:
+        """Build the video playback area with camera tiles and logger/AI sidebar."""
+        # Right sidebar: Logger & AI Assistant panel
+        self._sidebar_panel = tk.Frame(parent, bg=BG_SECONDARY, width=440)
+        self._sidebar_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=8)
+        self._sidebar_panel.pack_propagate(False)
+        self._build_sidebar(self._sidebar_panel)
+
+        left_panel = tk.Frame(parent, bg=BG_PRIMARY)
+        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._build_view_switcher(left_panel)
+
+        self._camera_frame = tk.Frame(left_panel, bg=BG_PRIMARY)
+        self._camera_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 4))
+
+        controls = tk.Frame(left_panel, bg="#0f172a", height=56)
+        controls.pack(fill=tk.X, padx=8, pady=(0, 8))
+        controls.pack_propagate(False)
+        self._build_controls(controls)
+
+        self._build_camera_tiles()
+        self._apply_view_layout()
+
     def _build_view_switcher(self, parent: tk.Frame) -> None:
-        """Toolbar with manual view switching buttons and auto-tracking status."""
         bar = tk.Frame(parent, bg="#0f172a", height=42)
         bar.pack(fill=tk.X, padx=8, pady=(8, 0))
         bar.pack_propagate(False)
@@ -311,24 +541,21 @@ class ReviewUI:
             "cursor": "hand2", "padx": 10, "pady": 3
         }
 
-        # Grid view button
-        self._btn_grid = tk.Button(
-            bar, text="▦ All Cameras (Grid)",
+        self._btn_grid = ProfessionalButton(
+            bar, text="All Cameras (Grid)",
             command=self._set_view_grid, **btn_style
         )
         self._btn_grid.pack(side=tk.LEFT, padx=3, pady=6)
         self._cam_view_btns["grid"] = self._btn_grid
 
-        # Per-camera buttons
         for cam_id in sorted(self._caps.keys()):
-            b = tk.Button(
-                bar, text=f"📷 Cam {cam_id}",
+            b = ProfessionalButton(
+                bar, text=f"Cam {cam_id}",
                 command=lambda c=cam_id: self._set_view_camera(c), **btn_style
             )
             b.pack(side=tk.LEFT, padx=3, pady=6)
             self._cam_view_btns[f"cam_{cam_id}"] = b
 
-        # Auto-tracking indicator / stop button
         self._tracking_status_frame = tk.Frame(bar, bg="#0f172a")
         self._tracking_status_frame.pack(side=tk.RIGHT, padx=12, pady=6)
 
@@ -337,7 +564,7 @@ class ReviewUI:
             bg=BG_TRACKED, fg=BORDER_TRACKED,
             font=("Menlo", 10, "bold"), padx=8, pady=2
         )
-        self._tracking_stop_btn = tk.Button(
+        self._tracking_stop_btn = ProfessionalButton(
             self._tracking_status_frame, text=" ✕ Stop Tracking ",
             command=self._stop_tracking,
             bg="#ef4444", fg="white", font=("Helvetica", 9, "bold"),
@@ -346,7 +573,6 @@ class ReviewUI:
         )
 
     def _build_controls(self, parent: tk.Frame) -> None:
-        """Build playback controls: step back, play/pause, step forward, seek slider."""
         btn_frame = tk.Frame(parent, bg="#0f172a")
         btn_frame.pack(side=tk.LEFT, padx=12, pady=8)
 
@@ -354,23 +580,27 @@ class ReviewUI:
                      "bd": 0, "activebackground": "#334155", "activeforeground": "white",
                      "cursor": "hand2", "padx": 8, "pady": 2}
 
-        self._btn_back = tk.Button(btn_frame, text="◀◀", command=self._step_back, **btn_style)
+        self._btn_back = ProfessionalButton(
+            btn_frame, text="← Previous frame", command=self._step_back, **btn_style
+        )
         self._btn_back.pack(side=tk.LEFT, padx=2)
 
-        self._btn_play = tk.Button(btn_frame, text=" ▶ ", command=self._toggle_play, **btn_style)
+        self._btn_play = ProfessionalButton(
+            btn_frame, text="▶ Play", command=self._toggle_play, **btn_style
+        )
         self._btn_play.pack(side=tk.LEFT, padx=2)
 
-        self._btn_fwd = tk.Button(btn_frame, text="▶▶", command=self._step_forward, **btn_style)
+        self._btn_fwd = ProfessionalButton(
+            btn_frame, text="Next frame →", command=self._step_forward, **btn_style
+        )
         self._btn_fwd.pack(side=tk.LEFT, padx=2)
 
-        # Frame counter
         self._frame_label = tk.Label(
             parent, text="Frame: 0", bg="#0f172a", fg=TEXT_MUTED,
             font=("Menlo", 10)
         )
         self._frame_label.pack(side=tk.LEFT, padx=(12, 8))
 
-        # Seek slider
         self._seek_var = tk.IntVar(value=0)
         self._seek_slider = tk.Scale(
             parent, from_=0, to=self._max_frame,
@@ -384,12 +614,11 @@ class ReviewUI:
         self._seek_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8, pady=8)
 
     def _build_logger(self, parent: tk.Frame) -> None:
-        """Build the person logger panel."""
         header = tk.Frame(parent, bg=BG_SECONDARY)
         header.pack(fill=tk.X, padx=12, pady=(12, 8))
 
         tk.Label(
-            header, text="👁  Person Logger",
+            header, text="Person Logger",
             bg=BG_SECONDARY, fg=TEXT_PRIMARY,
             font=("Helvetica", 13, "bold")
         ).pack(side=tk.LEFT)
@@ -407,10 +636,8 @@ class ReviewUI:
         )
         hint.pack(fill=tk.X, padx=12, pady=(0, 6))
 
-        # Separator
         tk.Frame(parent, bg=BORDER, height=1).pack(fill=tk.X, padx=8)
 
-        # Scrollable person list
         list_container = tk.Frame(parent, bg=BG_SECONDARY)
         list_container.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
@@ -446,12 +673,438 @@ class ReviewUI:
 
         self._build_person_cards()
 
-    # ── Camera Tiles & Layout ─────────────────────────────────────────────────
+    # ── Sidebar & AI Assistant Panel ──────────────────────────────────────────
+
+    def _build_sidebar(self, parent: tk.Frame) -> None:
+        """Build the right sidebar supporting Person Timeline and AI Assistant tabs."""
+        switch_bar = tk.Frame(parent, bg="#0f172a", height=42)
+        switch_bar.pack(fill=tk.X)
+        switch_bar.pack_propagate(False)
+
+        btn_style = {
+            "font": ("Helvetica", 10, "bold"),
+            "bd": 0, "cursor": "hand2", "pady": 6
+        }
+
+        self._sidebar_logger_btn = ProfessionalButton(
+            switch_bar, text="Person Timeline",
+            command=lambda: self._show_sidebar_tab("logger"),
+            bg=ACCENT_BLUE, fg="white",
+            activebackground="#2563eb", activeforeground="white",
+            **btn_style
+        )
+        self._sidebar_logger_btn.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._sidebar_ai_btn = ProfessionalButton(
+            switch_bar, text="AI Assistant",
+            command=lambda: self._show_sidebar_tab("ai"),
+            bg="#1e293b", fg=TEXT_SECONDARY,
+            activebackground="#334155", activeforeground="white",
+            **btn_style
+        )
+        self._sidebar_ai_btn.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._sidebar_body = tk.Frame(parent, bg=BG_SECONDARY)
+        self._sidebar_body.pack(fill=tk.BOTH, expand=True)
+
+        self._logger_container = tk.Frame(self._sidebar_body, bg=BG_SECONDARY)
+        self._ai_container = tk.Frame(self._sidebar_body, bg=BG_SECONDARY)
+
+        self._build_logger(self._logger_container)
+        self._build_ai_assistant_panel(self._ai_container)
+
+        self._show_sidebar_tab("logger")
+
+    def _show_sidebar_tab(self, tab: str) -> None:
+        """Switch between 'logger' and 'ai' sidebar tabs."""
+        self._sidebar_mode = tab
+        if tab == "logger":
+            self._ai_container.pack_forget()
+            self._logger_container.pack(fill=tk.BOTH, expand=True)
+            self._rebuild_cards()
+            self._sidebar_logger_btn.configure(bg=ACCENT_BLUE, fg="white")
+            self._sidebar_ai_btn.configure(bg="#1e293b", fg=TEXT_SECONDARY)
+            self._tab_ai_btn.configure(bg="#1e293b", fg=TEXT_SECONDARY)
+        else:
+            self._logger_container.pack_forget()
+            self._ai_container.pack(fill=tk.BOTH, expand=True)
+            self._sidebar_logger_btn.configure(bg="#1e293b", fg=TEXT_SECONDARY)
+            self._sidebar_ai_btn.configure(bg=ACCENT_PURPLE, fg="white")
+            self._tab_ai_btn.configure(bg=ACCENT_PURPLE, fg="white")
+            self._update_ai_status_badge()
+            if hasattr(self, "_ai_entry"):
+                self._ai_entry.focus_set()
+
+    def _update_ai_status_badge(self, custom_text: Optional[str] = None, custom_color: Optional[str] = None) -> None:
+        """Update the status badge indicating OpenAI API readiness."""
+        if not hasattr(self, "_ai_status_badge"):
+            return
+
+        if custom_text and custom_color:
+            self._ai_status_badge.configure(text=custom_text, fg=custom_color)
+            return
+
+        if self.ai_assistant.is_configured():
+            self._ai_status_badge.configure(
+                text=f"● {self.ai_assistant.model} Ready",
+                fg="#34d399", bg="#064e3b"
+            )
+        else:
+            self._ai_status_badge.configure(
+                text="Key in .env",
+                fg="#fde047", bg="#78350f"
+            )
+
+    def _build_ai_assistant_panel(self, parent: tk.Frame) -> None:
+        """Build the AI Assistant chat interface in the sidebar."""
+        header = tk.Frame(parent, bg=BG_SECONDARY)
+        header.pack(fill=tk.X, padx=12, pady=(10, 6))
+
+        tk.Label(
+            header, text="AI Intelligence",
+            bg=BG_SECONDARY, fg=TEXT_PRIMARY,
+            font=("Helvetica", 12, "bold")
+        ).pack(side=tk.LEFT)
+
+        clear_btn = ProfessionalButton(
+            header, text="Clear",
+            command=self._clear_ai_chat,
+            bg="#1e293b", fg=TEXT_MUTED, font=("Helvetica", 9),
+            bd=0, activebackground="#334155", activeforeground="white",
+            padx=6, pady=2, cursor="hand2"
+        )
+        clear_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
+        self._ai_status_badge = tk.Label(
+            header, text="● Checking...",
+            bg="#1e293b", fg=TEXT_MUTED,
+            font=("Menlo", 9, "bold"), padx=6, pady=2
+        )
+        self._ai_status_badge.pack(side=tk.RIGHT)
+        self._update_ai_status_badge()
+
+        # Input Area (Packed FIRST at bottom so it is NEVER squished or clipped)
+        input_bar = tk.Frame(parent, bg="#0f172a", height=54)
+        input_bar.pack(fill=tk.X, side=tk.BOTTOM, padx=8, pady=8)
+        input_bar.pack_propagate(False)
+
+        input_inner = tk.Frame(input_bar, bg="#1e293b", padx=6, pady=4)
+        input_inner.pack(fill=tk.BOTH, expand=True)
+
+        self._ai_entry = tk.Entry(
+            input_inner, bg="#1e293b", fg="#ffffff",
+            insertbackground="#ffffff", font=("Helvetica", 11),
+            bd=0
+        )
+        self._ai_entry.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(4, 6))
+        self._ai_entry.bind("<Return>", lambda e: self._on_ai_submit())
+
+        self._ai_send_btn = ProfessionalButton(
+            input_inner, text="Ask",
+            command=self._on_ai_submit,
+            bg=ACCENT_BLUE, fg="white",
+            activebackground="#2563eb", activeforeground="white",
+            font=("Helvetica", 10, "bold"), bd=0,
+            padx=12, pady=4, cursor="hand2"
+        )
+        self._ai_send_btn.pack(side=tk.RIGHT)
+
+        # Chat Text Container (Fills middle area)
+        chat_container = tk.Frame(parent, bg="#0f172a")
+        chat_container.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+
+        self._ai_text = tk.Text(
+            chat_container, bg="#0f172a", fg="#f1f5f9",
+            wrap=tk.WORD, bd=0, padx=10, pady=10,
+            font=("Helvetica", 10), insertbackground="white"
+        )
+        ai_scrollbar = tk.Scrollbar(
+            chat_container, orient=tk.VERTICAL,
+            command=self._ai_text.yview,
+            bg="#0f172a", troughcolor="#0f172a",
+            activebackground=TEXT_MUTED, width=8
+        )
+        self._ai_text.configure(yscrollcommand=ai_scrollbar.set)
+
+        ai_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self._ai_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Configure rich text tags
+        self._ai_text.tag_configure("user_hdr", font=("Helvetica", 10, "bold"), foreground="#38bdf8", spacing1=4, spacing3=2)
+        self._ai_text.tag_configure("user_body", font=("Helvetica", 10), foreground="#f8fafc", spacing3=6)
+        self._ai_text.tag_configure("ai_hdr", font=("Helvetica", 10, "bold"), foreground="#c084fc", spacing1=6, spacing3=2)
+        self._ai_text.tag_configure("ai_body", font=("Helvetica", 10), foreground="#cbd5e1", spacing3=4)
+        self._ai_text.tag_configure("bold", font=("Helvetica", 10, "bold"), foreground="#ffffff")
+        self._ai_text.tag_configure("status", font=("Helvetica", 9, "italic"), foreground="#94a3b8", spacing3=4)
+        self._ai_text.tag_configure("error", font=("Helvetica", 10, "bold"), foreground="#f87171", spacing3=4)
+
+        # Initial greeting
+        self._add_ai_message(
+            "ai",
+            "Welcome to Sensen Video Intelligence.\n\n"
+            "Ask questions about your tracked footage:\n"
+            "• Where was Person 1 and what time?\n"
+            "• What clothes is he wearing?\n"
+            "• Who was in Camera 2?\n"
+            "• Did anyone have a backpack?\n\n"
+            "Whenever a sighting is referenced (like [Cam 1 @ 0:15]), click the jump button to seek directly to the video."
+        )
+
+    def _on_ai_submit(self) -> None:
+        """Handle submit button click or Enter key."""
+        prompt = self._ai_entry.get().strip()
+        if not prompt:
+            return
+
+        self._ai_entry.delete(0, tk.END)
+        self._send_ai_query(prompt)
+
+    def _send_ai_query(self, prompt: str) -> None:
+        """Send prompt to the AI Assistant asynchronously."""
+        self._pending_ai_query = prompt
+        # 1. Add user message
+        self._add_ai_message("user", prompt)
+
+        # 2. Update status and disable send button
+        self._update_ai_status_badge("● Analyzing...", "#38bdf8")
+        self._ai_send_btn.configure(state=tk.DISABLED, text="Thinking…")
+
+        # 3. Add temporary status text in chat
+        self._add_ai_message("status", "Analyzing tracking footage & visual data with GPT-4o-mini…")
+
+        # 4. Dispatch async call
+        self.ai_assistant.ask_async(prompt, self._on_ai_response)
+
+    def _on_ai_response(self, reply: str, error: Optional[Exception]) -> None:
+        """Callback from background worker thread."""
+        self.root.after(0, lambda: self._handle_ai_response_ui(reply, error))
+
+    def _handle_ai_response_ui(self, reply: str, error: Optional[Exception]) -> None:
+        """Update UI on the main thread after response arrives."""
+        self._update_ai_status_badge()
+        self._ai_send_btn.configure(state=tk.NORMAL, text="Ask")
+
+        if error:
+            self._add_ai_message("error", f"Error: {error}")
+        else:
+            query = self._pending_ai_query or ""
+            evidence = self.ai_assistant.get_visual_evidence(query, reply)
+            self._add_ai_message("ai", reply, evidence=evidence)
+
+        self._pending_ai_query = None
+
+        self._ai_entry.focus_set()
+
+    def _add_ai_message(
+        self,
+        role: str,
+        text: str,
+        evidence: Optional[List[dict]] = None,
+    ) -> None:
+        """Add a styled message to the rich Text widget with LaTeX cleaning and interactive buttons."""
+        import re
+
+        self._ai_text.configure(state=tk.NORMAL)
+
+        if role == "user":
+            self._ai_text.insert(tk.END, "You\n", "user_hdr")
+            self._ai_text.insert(tk.END, f"{text.strip()}\n\n", "user_body")
+
+        elif role == "status":
+            self._ai_text.insert(tk.END, f"{text.strip()}\n\n", "status")
+
+        elif role == "error":
+            self._ai_text.insert(tk.END, f"{text.strip()}\n\n", "error")
+
+        elif role == "ai":
+            self._ai_text.insert(tk.END, "Sensen AI\n", "ai_hdr")
+
+            # 1. Clean LaTeX equations and symbols into clean Unicode
+            latex_map = {
+                r"\\approx": "≈",
+                r"\\times": "×",
+                r"\\le": "≤",
+                r"\\ge": "≥",
+                r"\\neq": "≠",
+                r"\\pm": "±",
+                r"\\rightarrow": "→",
+                r"\\leftarrow": "←",
+                r"\\cdot": "·",
+                r"\\degree": "°",
+                r"\\circ": "°",
+                r"\\sim": "~",
+                r"\\textbf\{([^}]+)\}": r"**\1**",
+                r"\\text\{([^}]+)\}": r"\1",
+            }
+            clean_text = text
+            for pat, rep in latex_map.items():
+                clean_text = re.sub(pat, rep, clean_text)
+            clean_text = re.sub(r"\$\$([^$]+)\$\$", r"\1", clean_text)
+            clean_text = re.sub(r"\$([^$]+)\$", r"\1", clean_text)
+
+            # 2. Parse markdown bold **text** and insert tokens
+            last_end = 0
+            for match in re.finditer(r"\*\*([^*]+)\*\*", clean_text):
+                start, end = match.span()
+                if start > last_end:
+                    self._ai_text.insert(tk.END, clean_text[last_end:start], "ai_body")
+                self._ai_text.insert(tk.END, match.group(1), "bold")
+                last_end = end
+            if last_end < len(clean_text):
+                self._ai_text.insert(tk.END, clean_text[last_end:], "ai_body")
+
+            self._ai_text.insert(tk.END, "\n")
+
+            if evidence:
+                self._insert_ai_visual_evidence(evidence)
+
+            # 3. Interactive citations & jump buttons
+            citations = parse_camera_timestamp(text)
+            person_ids = parse_person_ids(text)
+
+            if citations or person_ids:
+                btn_frame = tk.Frame(self._ai_text, bg="#0f172a")
+
+                for cid, ts_str, total_sec in citations:
+                    btn = ProfessionalButton(
+                        btn_frame, text=f"Cam {cid} ({ts_str})",
+                        command=lambda c=cid, s=total_sec: self.jump_to_timestamp(c, s),
+                        bg="#065f46", fg="#34d399",
+                        activebackground="#047857", activeforeground="white",
+                        font=("Menlo", 9, "bold"), bd=0, padx=8, pady=3,
+                        cursor="hand2"
+                    )
+                    btn.pack(side=tk.LEFT, padx=(0, 6), pady=2)
+
+                for gid in person_ids[:3]:
+                    btn = ProfessionalButton(
+                        btn_frame, text=f"Track ID:{gid}",
+                        command=lambda g=gid: self._on_person_clicked(g),
+                        bg="#1e1b4b", fg="#38bdf8",
+                        activebackground="#312e81", activeforeground="white",
+                        font=("Menlo", 9, "bold"), bd=0, padx=8, pady=3,
+                        cursor="hand2"
+                    )
+                    btn.pack(side=tk.LEFT, padx=(0, 6), pady=2)
+
+                self._ai_text.window_create(tk.END, window=btn_frame)
+                self._ai_text.insert(tk.END, "\n\n")
+            else:
+                self._ai_text.insert(tk.END, "\n")
+
+        self._ai_text.see(tk.END)
+        self._ai_text.configure(state=tk.DISABLED)
+
+    def _insert_ai_visual_evidence(self, evidence: List[dict]) -> None:
+        """Embed the image crops used to support a visual AI answer."""
+        evidence_card = tk.Frame(
+            self._ai_text,
+            bg=BG_CARD,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+            padx=10,
+            pady=8,
+        )
+
+        tk.Label(
+            evidence_card,
+            text="VISUAL EVIDENCE",
+            bg=BG_CARD,
+            fg=ACCENT_PURPLE,
+            font=("Menlo", 9, "bold"),
+        ).pack(anchor="w", pady=(0, 6))
+
+        for item in evidence:
+            gid = int(item["global_id"])
+            row = tk.Frame(evidence_card, bg=BG_CARD)
+            row.pack(fill=tk.X, pady=(0, 8))
+
+            thumbnails = item.get("thumbnails_b64", [])[:3]
+            tk.Label(
+                row,
+                text=f"Person {gid:03d}\n{len(thumbnails)} AI view{'s' if len(thumbnails) != 1 else ''}",
+                bg=BG_CARD,
+                fg=TEXT_SECONDARY,
+                justify=tk.LEFT,
+                font=("Menlo", 9, "bold"),
+                width=12,
+                anchor="w",
+            ).pack(side=tk.LEFT, padx=(0, 8))
+
+            for view_number, thumbnail_b64 in enumerate(thumbnails, start=1):
+                try:
+                    raw = base64.b64decode(thumbnail_b64)
+                    image = Image.open(io.BytesIO(raw)).convert("RGB")
+                    image.thumbnail((72, 88), Image.LANCZOS)
+                    photo = ImageTk.PhotoImage(image)
+                    self._ai_evidence_refs.append(photo)
+
+                    image_frame = tk.Frame(row, bg=BORDER, padx=1, pady=1)
+                    image_frame.pack(side=tk.LEFT, padx=(0, 6))
+                    image_label = tk.Label(
+                        image_frame,
+                        image=photo,
+                        text=f"View {view_number}",
+                        compound=tk.TOP,
+                        bg=BG_EXPANDED,
+                        fg=TEXT_MUTED,
+                        font=("Menlo", 8),
+                        padx=2,
+                        pady=2,
+                        cursor="hand2",
+                    )
+                    image_label.pack()
+                    image_label.bind(
+                        "<Button-1>", lambda _event, person_id=gid: self._on_person_clicked(person_id)
+                    )
+                except Exception:
+                    continue
+
+        tk.Label(
+            evidence_card,
+            text="Crops supplied to the vision model · Click a crop to track",
+            bg=BG_CARD,
+            fg=TEXT_MUTED,
+            font=("Helvetica", 9, "italic"),
+        ).pack(anchor="w", pady=(0, 2))
+
+        self._ai_text.window_create(tk.END, window=evidence_card)
+        self._ai_text.insert(tk.END, "\n\n")
+
+    def _clear_ai_chat(self) -> None:
+        """Clear chat history widgets."""
+        self._ai_text.configure(state=tk.NORMAL)
+        self._ai_text.delete("1.0", tk.END)
+        self._ai_evidence_refs.clear()
+        self._ai_text.configure(state=tk.DISABLED)
+        self.ai_assistant.clear_history()
+        self._add_ai_message("ai", "Chat cleared. What else would you like to analyze?")
+
+    def jump_to_timestamp(self, cam_id: int, total_seconds: int, gid: Optional[int] = None) -> None:
+        """Jump playback directly to a specified camera and timestamp."""
+        fps = self.cameras.get(cam_id, {}).get("fps", 25.0)
+        target_frame = int(total_seconds * fps)
+        target_frame = max(0, min(self._max_frame, target_frame))
+
+        if gid is not None:
+            self._tracked_gid = gid
+
+        if cam_id in self._caps or cam_id in self._raw_caps:
+            self._view_mode = "single"
+            self._selected_cam = cam_id
+            self._apply_view_layout()
+
+        self._seek_to_frame(target_frame)
 
     def _build_camera_tiles(self) -> None:
-        """Create camera tile widgets."""
         for cam_id in sorted(self._caps.keys()):
-            card = tk.Frame(self._camera_frame, bg=BG_SECONDARY, bd=0)
+            card = tk.Frame(
+                self._camera_frame,
+                bg=BG_SECONDARY,
+                bd=0,
+                highlightbackground=BORDER,
+                highlightthickness=1,
+            )
             card.grid_rowconfigure(0, weight=1)
             card.grid_columnconfigure(0, weight=1)
 
@@ -468,12 +1121,10 @@ class ReviewUI:
             self._cam_overlays[cam_id] = overlay
             self._cam_cards[cam_id] = card
 
-            # Bind double click to maximize/minimize camera
             for w in [cam_label, overlay]:
                 w.bind("<Double-Button-1>", lambda e, c=cam_id: self._toggle_camera_fullscreen(c))
 
     def _apply_view_layout(self) -> None:
-        """Apply either grid layout or single full-screen camera layout."""
         for r in range(10):
             self._camera_frame.grid_rowconfigure(r, weight=0, uniform="")
             self._camera_frame.grid_columnconfigure(r, weight=0, uniform="")
@@ -481,7 +1132,6 @@ class ReviewUI:
         cam_ids = sorted(self._caps.keys())
 
         if self._view_mode == "single" and self._selected_cam is not None:
-            # Single camera mode (Full View)
             self._camera_frame.grid_rowconfigure(0, weight=1)
             self._camera_frame.grid_columnconfigure(0, weight=1)
 
@@ -491,7 +1141,6 @@ class ReviewUI:
                 else:
                     card.grid_remove()
 
-            # Update buttons
             self._btn_grid.configure(bg="#1e293b", fg=TEXT_SECONDARY)
             for cid in cam_ids:
                 btn = self._cam_view_btns.get(f"cam_{cid}")
@@ -501,32 +1150,635 @@ class ReviewUI:
                     else:
                         btn.configure(bg="#1e293b", fg=TEXT_SECONDARY)
         else:
-            # Grid mode
-            cols = 2
-            n_rows = (len(cam_ids) + cols - 1) // cols
-
-            for r in range(n_rows):
-                self._camera_frame.grid_rowconfigure(r, weight=1, uniform="cam_row")
+            # Grid mode: arrange all cameras in a responsive grid
+            n = len(cam_ids)
+            cols = max(1, min(3, n))
+            rows = (n + cols - 1) // cols
+            for r in range(rows):
+                self._camera_frame.grid_rowconfigure(r, weight=1, uniform="row")
             for c in range(cols):
-                self._camera_frame.grid_columnconfigure(c, weight=1, uniform="cam_col")
+                self._camera_frame.grid_columnconfigure(c, weight=1, uniform="col")
 
             for idx, cid in enumerate(cam_ids):
-                row, col = divmod(idx, cols)
-                card = self._cam_cards[cid]
-                card.grid(row=row, column=col, padx=4, pady=4, sticky="nsew")
+                card = self._cam_cards.get(cid)
+                if card is None:
+                    continue
+                row = idx // cols
+                col = idx % cols
+                card.grid(row=row, column=col, sticky="nsew", padx=4, pady=4)
 
-            # Update buttons
             self._btn_grid.configure(bg=ACCENT_BLUE, fg="white")
             for cid in cam_ids:
                 btn = self._cam_view_btns.get(f"cam_{cid}")
                 if btn:
                     btn.configure(bg="#1e293b", fg=TEXT_SECONDARY)
 
-        self._update_tracking_status_ui()
+    def _build_gallery_section(self, parent: tk.Frame) -> None:
+        """Build the People Gallery section for reviewing person profiles and merging IDs."""
+        toolbar = tk.Frame(parent, bg="#0f172a", height=60)
+        toolbar.pack(fill=tk.X, padx=12, pady=(10, 6))
+        toolbar.pack_propagate(False)
+
+        title_frame = tk.Frame(toolbar, bg="#0f172a")
+        title_frame.pack(side=tk.LEFT, padx=12, pady=8)
+
+        tk.Label(
+            title_frame, text="People Gallery",
+            bg="#0f172a", fg=TEXT_PRIMARY,
+            font=("Helvetica", 15, "bold")
+        ).pack(anchor="w")
+
+        self._gallery_subtitle = tk.Label(
+            title_frame, text=f"{len(self.persons)} distinct person identities detected across cameras.",
+            bg="#0f172a", fg=TEXT_MUTED, font=("Helvetica", 10)
+        )
+        self._gallery_subtitle.pack(anchor="w")
+
+        export_btn = ProfessionalButton(
+            toolbar,
+            text="Export Person Summary (PDF)",
+            command=self._export_person_summary_pdf,
+            bg=ACCENT_GREEN,
+            fg="white",
+            activebackground="#047857",
+            activeforeground="white",
+            cursor="hand2",
+            padx=14,
+            pady=5,
+        )
+        export_btn.pack(side=tk.RIGHT, padx=12, pady=12)
+
+        self._merge_alert_frame = tk.Frame(parent, bg="#78350f", height=42)
+        self._merge_alert_label = tk.Label(
+            self._merge_alert_frame, text="",
+            bg="#78350f", fg="#fef3c7", font=("Helvetica", 10, "bold")
+        )
+        self._merge_alert_label.pack(side=tk.LEFT, padx=16, pady=8)
+
+        self._merge_cancel_btn = ProfessionalButton(
+            self._merge_alert_frame, text=" Cancel Merge ",
+            command=self._cancel_merge,
+            bg="#dc2626", fg="white", font=("Helvetica", 9, "bold"),
+            bd=0, activebackground="#b91c1c", activeforeground="white",
+            cursor="hand2", padx=8, pady=3
+        )
+        self._merge_cancel_btn.pack(side=tk.RIGHT, padx=12, pady=6)
+
+        grid_container = tk.Frame(parent, bg=BG_PRIMARY)
+        grid_container.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
+
+        self._gallery_canvas = tk.Canvas(
+            grid_container, bg=BG_PRIMARY, highlightthickness=0, bd=0
+        )
+        gallery_scrollbar = tk.Scrollbar(
+            grid_container, orient=tk.VERTICAL,
+            command=self._gallery_canvas.yview,
+            bg=BG_PRIMARY, troughcolor=BG_PRIMARY,
+            activebackground=TEXT_MUTED, width=10
+        )
+        self._gallery_canvas.configure(yscrollcommand=gallery_scrollbar.set)
+
+        gallery_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self._gallery_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._gallery_grid_frame = tk.Frame(self._gallery_canvas, bg=BG_PRIMARY)
+        self._gallery_canvas_window = self._gallery_canvas.create_window(
+            (0, 0), window=self._gallery_grid_frame, anchor="nw"
+        )
+
+        self._gallery_grid_frame.bind(
+            "<Configure>",
+            lambda e: self._gallery_canvas.configure(scrollregion=self._gallery_canvas.bbox("all"))
+        )
+        self._gallery_canvas.bind(
+            "<Configure>",
+            lambda e: self._gallery_canvas.itemconfig(self._gallery_canvas_window, width=e.width)
+        )
+
+    @staticmethod
+    def _pdf_font(size: int, bold: bool = False):
+        """Load a portable report font with a safe Pillow fallback."""
+        names = (
+            ("DejaVuSans-Bold.ttf", "Arial Bold.ttf")
+            if bold else ("DejaVuSans.ttf", "Arial.ttf")
+        )
+        for name in names:
+            try:
+                return ImageFont.truetype(name, size)
+            except OSError:
+                continue
+        return ImageFont.load_default()
+
+    @staticmethod
+    def _draw_pdf_wrapped_text(
+        draw: ImageDraw.ImageDraw,
+        text: str,
+        x: int,
+        y: int,
+        font,
+        fill: str,
+        max_width: int,
+        line_gap: int = 10,
+    ) -> int:
+        """Draw pixel-width-wrapped text and return the next vertical position."""
+        line_height = draw.textbbox((0, 0), "Ag", font=font)[3] + line_gap
+        for paragraph in str(text).splitlines() or [""]:
+            words = paragraph.split()
+            lines: List[str] = []
+            current = ""
+            for word in words:
+                candidate = f"{current} {word}".strip()
+                width = draw.textbbox((0, 0), candidate, font=font)[2]
+                if current and width > max_width:
+                    lines.append(current)
+                    current = word
+                else:
+                    current = candidate
+            lines.append(current)
+            for line in lines:
+                draw.text((x, y), line, font=font, fill=fill)
+                y += line_height
+        return y
+
+    def _build_person_summary_pages(self) -> List[Image.Image]:
+        """Render a professional PDF page (plus continuations) per person."""
+        page_size = (1240, 1754)
+        margin = 82
+        pages: List[Image.Image] = []
+        title_font = self._pdf_font(46, bold=True)
+        person_font = self._pdf_font(36, bold=True)
+        section_font = self._pdf_font(24, bold=True)
+        body_font = self._pdf_font(21)
+        body_bold = self._pdf_font(21, bold=True)
+        small_font = self._pdf_font(17)
+
+        def new_page(gid: int, continuation: bool = False):
+            page = Image.new("RGB", page_size, "#f8fafc")
+            draw = ImageDraw.Draw(page)
+            draw.rectangle((0, 0, page_size[0], 150), fill="#0f172a")
+            draw.text((margin, 38), "SENSEN", font=title_font, fill="#f8fafc")
+            subtitle = f"PERSON {gid:03d} SUMMARY"
+            if continuation:
+                subtitle += " · CONTINUED"
+            draw.text((margin, 108), subtitle, font=small_font, fill="#94a3b8")
+            return page, draw
+
+        for gid in sorted(self.persons):
+            person = self.persons[gid]
+            profile = self.ai_assistant.get_cached_profile(gid) or {}
+            description = profile.get("description") or "Not visually analyzed."
+            appearances = sorted(
+                person.get("appearances", []),
+                key=lambda item: (item.get("first_frame", 0), item.get("camera_id", 0)),
+            )
+            total_duration = sum(float(item.get("duration_seconds", 0)) for item in appearances)
+            cameras = person.get("cameras_seen", [])
+
+            page, draw = new_page(gid)
+            draw.text((margin, 190), f"Person ID {gid:03d}", font=person_font, fill="#0f172a")
+
+            # Primary tracked crop
+            crop_box = (margin, 265, 402, 695)
+            draw.rounded_rectangle(crop_box, radius=18, fill="#e2e8f0", outline="#cbd5e1", width=3)
+            thumbnail_b64 = person.get("thumbnail_b64")
+            if thumbnail_b64:
+                try:
+                    crop = Image.open(io.BytesIO(base64.b64decode(thumbnail_b64))).convert("RGB")
+                    scale = min(280 / crop.width, 388 / crop.height)
+                    crop = crop.resize(
+                        (max(1, int(crop.width * scale)), max(1, int(crop.height * scale))),
+                        Image.LANCZOS,
+                    )
+                    crop_x = crop_box[0] + (crop_box[2] - crop_box[0] - crop.width) // 2
+                    crop_y = crop_box[1] + (crop_box[3] - crop_box[1] - crop.height) // 2
+                    page.paste(crop, (crop_x, crop_y))
+                except Exception:
+                    draw.text((173, 455), "Image unavailable", font=body_font, fill="#64748b")
+            else:
+                draw.text((173, 455), "No tracked crop", font=body_font, fill="#64748b")
+
+            details_x = 455
+            details_y = 285
+            summary_items = (
+                ("Cameras visited", ", ".join(f"Cam {cam}" for cam in cameras) or "None"),
+                ("Appearance segments", str(len(appearances))),
+                ("Total visible duration", f"{total_duration:.1f} seconds"),
+                ("Total detections", str(person.get("total_detections", 0))),
+                ("AI evidence views", str(profile.get("thumbnail_count", 0))),
+            )
+            for label, value in summary_items:
+                draw.text((details_x, details_y), label.upper(), font=small_font, fill="#64748b")
+                details_y += 27
+                details_y = self._draw_pdf_wrapped_text(
+                    draw, value, details_x, details_y, body_bold, "#0f172a", 680, 7
+                ) + 19
+
+            y = 750
+            draw.text((margin, y), "APPEARANCE", font=section_font, fill="#2563eb")
+            y = self._draw_pdf_wrapped_text(
+                draw, description, margin, y + 42, body_font, "#334155", 1075, 11
+            ) + 38
+
+            draw.line((margin, y, page_size[0] - margin, y), fill="#cbd5e1", width=2)
+            y += 34
+            draw.text((margin, y), "CAMERA TIMELINE", font=section_font, fill="#2563eb")
+            y += 50
+
+            if not appearances:
+                draw.text((margin, y), "No appearance timeline was recorded.", font=body_font, fill="#64748b")
+            else:
+                for index, appearance in enumerate(appearances, start=1):
+                    camera_id = appearance.get("camera_id", "?")
+                    line = (
+                        f"{index}. Cam {camera_id}   "
+                        f"{appearance.get('first_timestamp', '—')} – "
+                        f"{appearance.get('last_timestamp', '—')}   "
+                        f"({float(appearance.get('duration_seconds', 0)):.1f}s, "
+                        f"frames {appearance.get('first_frame', '—')}–{appearance.get('last_frame', '—')})"
+                    )
+                    if y > 1600:
+                        pages.append(page)
+                        page, draw = new_page(gid, continuation=True)
+                        y = 205
+                        draw.text((margin, y), "CAMERA TIMELINE", font=section_font, fill="#2563eb")
+                        y += 50
+                    draw.rounded_rectangle(
+                        (margin, y - 8, page_size[0] - margin, y + 48),
+                        radius=8,
+                        fill="#ffffff",
+                        outline="#e2e8f0",
+                        width=2,
+                    )
+                    draw.text((margin + 18, y + 7), line, font=small_font, fill="#334155")
+                    y += 70
+            pages.append(page)
+
+        for page_number, page in enumerate(pages, start=1):
+            draw = ImageDraw.Draw(page)
+            footer = f"Generated {datetime.now():%Y-%m-%d %H:%M}  ·  Page {page_number} of {len(pages)}"
+            draw.text((margin, 1705), footer, font=small_font, fill="#94a3b8")
+        return pages
+
+    def _export_person_summary_pdf(self) -> None:
+        """Prompt for a destination and export one visual summary per person."""
+        if not self.persons:
+            messagebox.showwarning("Nothing to Export", "No person records were found.", parent=self.root)
+            return
+
+        default_name = f"sensen_person_summary_{datetime.now():%Y%m%d_%H%M%S}.pdf"
+        destination = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Export Person Summary",
+            initialdir=str(self.output_dir),
+            initialfile=default_name,
+            defaultextension=".pdf",
+            filetypes=[("PDF files", "*.pdf")],
+        )
+        if not destination:
+            return
+
+        try:
+            pages = self._build_person_summary_pages()
+            pages[0].save(
+                destination,
+                "PDF",
+                resolution=150.0,
+                save_all=True,
+                append_images=pages[1:],
+            )
+        except (OSError, ValueError) as error:
+            messagebox.showerror(
+                "Export Failed",
+                f"The person summary could not be saved:\n\n{error}",
+                parent=self.root,
+            )
+            return
+
+        messagebox.showinfo(
+            "Export Complete",
+            f"Exported {len(self.persons)} person summaries to:\n\n{destination}",
+            parent=self.root,
+        )
+
+    def _rebuild_gallery_grid(self) -> None:
+        """Populate the People Gallery grid with cards for each person."""
+        for widget in self._gallery_grid_frame.winfo_children():
+            widget.destroy()
+        self._gallery_thumb_refs.clear()
+
+        count = len(self.persons)
+        self._gallery_subtitle.configure(
+            text=f"{count} distinct person identities detected across cameras. Click 'Merge with...' to merge duplicate IDs."
+        )
+        self._tab_gallery_btn.configure(text=f"People Gallery ({count})")
+        self._count_label.configure(text=f"{count} IDs")
+
+        if self._merge_source_gid is not None:
+            src = self._merge_source_gid
+            self._merge_alert_label.configure(
+                text=f"⚠️ MERGE MODE: Selected ID:{src:03d} — Now click 'Merge into ID...' on the target card below."
+            )
+            self._merge_alert_frame.pack(fill=tk.X, padx=12, pady=(0, 6), before=self._gallery_grid_frame.master)
+        else:
+            self._merge_alert_frame.pack_forget()
+
+        if not self.persons:
+            tk.Label(
+                self._gallery_grid_frame, text="No person records found in tracking log.",
+                bg=BG_PRIMARY, fg=TEXT_MUTED, font=("Helvetica", 14), pady=40
+            ).pack()
+            return
+
+        cols = 3
+        for idx, gid in enumerate(sorted(self.persons.keys())):
+            row, col = divmod(idx, cols)
+            self._build_one_gallery_card(self._gallery_grid_frame, gid, row, col)
+
+    def _build_one_gallery_card(self, parent: tk.Frame, gid: int, row: int, col: int) -> None:
+        """Build an individual profile card in the People Gallery."""
+        person = self.persons[gid]
+        color_hex = person.get("color_hex", "#64748b")
+        is_merge_source = (self._merge_source_gid == gid)
+        is_merge_active = (self._merge_source_gid is not None)
+
+        border_color = BORDER_MERGE if is_merge_source else BORDER
+        bg_card = BG_MERGE_SRC if is_merge_source else BG_CARD
+
+        card_outer = tk.Frame(parent, bg=border_color, bd=1)
+        card_outer.grid(row=row, column=col, padx=8, pady=8, sticky="nsew")
+        parent.grid_columnconfigure(col, weight=1, uniform="gallery_col")
+
+        card = tk.Frame(card_outer, bg=bg_card, padx=12, pady=12)
+        card.pack(fill=tk.BOTH, expand=True)
+
+        # Top Row
+        top_row = tk.Frame(card, bg=bg_card)
+        top_row.pack(fill=tk.X, pady=(0, 10))
+
+        swatch = tk.Frame(top_row, bg=color_hex, width=14, height=14)
+        swatch.pack(side=tk.LEFT, padx=(0, 8), pady=2)
+        swatch.pack_propagate(False)
+
+        tk.Label(
+            top_row, text=f"Person ID: {gid:03d}",
+            bg=bg_card, fg=TEXT_PRIMARY,
+            font=("Menlo", 14, "bold")
+        ).pack(side=tk.LEFT)
+
+        if is_merge_source:
+            tk.Label(
+                top_row, text=" [MERGE SOURCE] ",
+                bg="#f59e0b", fg="#000000",
+                font=("Menlo", 9, "bold"), padx=4, pady=1
+            ).pack(side=tk.RIGHT)
+        else:
+            tk.Label(
+                top_row, text=f"×{person.get('total_detections', 0)} frames",
+                bg=bg_card, fg=TEXT_MUTED, font=("Menlo", 10)
+            ).pack(side=tk.RIGHT)
+
+        # Middle Row
+        mid_row = tk.Frame(card, bg=bg_card)
+        mid_row.pack(fill=tk.X, pady=(0, 10))
+
+        thumb_w, thumb_h = 95, 125
+        thumb_frame = tk.Frame(mid_row, bg=BORDER, width=thumb_w, height=thumb_h)
+        thumb_frame.pack_propagate(False)
+        thumb_frame.pack(side=tk.LEFT, padx=(0, 14))
+
+        if person.get("thumbnail_b64"):
+            try:
+                raw = base64.b64decode(person["thumbnail_b64"])
+                pil_img = Image.open(io.BytesIO(raw))
+                pil_img = pil_img.resize((thumb_w - 4, thumb_h - 4), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(pil_img)
+                thumb_label = tk.Label(thumb_frame, image=photo, bg=BORDER, bd=0)
+                thumb_label.pack(fill=tk.BOTH, expand=True)
+                self._gallery_thumb_refs[gid] = photo
+            except Exception:
+                tk.Label(thumb_frame, text="N/A", bg=BG_SECONDARY, fg=TEXT_MUTED,
+                         font=("Helvetica", 14)).pack(fill=tk.BOTH, expand=True)
+        else:
+            tk.Label(thumb_frame, text="N/A", bg=BG_SECONDARY, fg=TEXT_MUTED,
+                     font=("Helvetica", 14)).pack(fill=tk.BOTH, expand=True)
+
+        stats_col = tk.Frame(mid_row, bg=bg_card)
+        stats_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        apps = person.get("appearances", [])
+        total_sec = sum(a.get("duration_seconds", 0) for a in apps)
+        tk.Label(
+            stats_col, text=f"Appearances: {len(apps)} segment(s)",
+            bg=bg_card, fg=TEXT_SECONDARY, font=("Helvetica", 10, "bold")
+        ).pack(anchor="w", pady=(0, 2))
+
+        tk.Label(
+            stats_col, text=f"Total Duration: {total_sec:.1f}s",
+            bg=bg_card, fg=TEXT_MUTED, font=("Helvetica", 10)
+        ).pack(anchor="w", pady=(0, 6))
+
+        tk.Label(
+            stats_col, text="Cameras Visited:",
+            bg=bg_card, fg=TEXT_SECONDARY, font=("Helvetica", 9, "bold")
+        ).pack(anchor="w", pady=(0, 2))
+
+        cam_tag_row = tk.Frame(stats_col, bg=bg_card)
+        cam_tag_row.pack(anchor="w")
+
+        cams = person.get("cameras_seen", [])
+        if cams:
+            for c in cams:
+                tk.Label(
+                    cam_tag_row, text=f" Cam {c} ", bg="#1e293b", fg=ACCENT_BLUE,
+                    font=("Menlo", 9, "bold"), padx=4, pady=2
+                ).pack(side=tk.LEFT, padx=(0, 4))
+        else:
+            tk.Label(cam_tag_row, text="None", bg=bg_card, fg=TEXT_MUTED, font=("Helvetica", 9)).pack()
+
+        # Bottom Row
+        btn_row = tk.Frame(card, bg=bg_card)
+        btn_row.pack(fill=tk.X, pady=(6, 0))
+
+        view_btn = ProfessionalButton(
+            btn_row, text="View in Video",
+            command=lambda g=gid: self._jump_to_person_video(g),
+            bg="#1e293b", fg=TEXT_PRIMARY, font=("Helvetica", 9, "bold"),
+            bd=0, activebackground="#334155", activeforeground="white",
+            cursor="hand2", padx=8, pady=4
+        )
+        view_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        if not is_merge_active:
+            merge_btn = ProfessionalButton(
+                btn_row, text="Merge with...",
+                command=lambda g=gid: self._start_merge(g),
+                bg="#334155", fg=ACCENT_YELLOW, font=("Helvetica", 9, "bold"),
+                bd=0, activebackground="#475569", activeforeground="white",
+                cursor="hand2", padx=8, pady=4
+            )
+            merge_btn.pack(side=tk.RIGHT)
+        elif is_merge_source:
+            cancel_btn = ProfessionalButton(
+                btn_row, text="Cancel Selection",
+                command=self._cancel_merge,
+                bg="#dc2626", fg="white", font=("Helvetica", 9, "bold"),
+                bd=0, activebackground="#b91c1c", activeforeground="white",
+                cursor="hand2", padx=8, pady=4
+            )
+            cancel_btn.pack(side=tk.RIGHT)
+        else:
+            confirm_btn = ProfessionalButton(
+                btn_row, text=f"✓ Merge into ID:{gid:03d}",
+                command=lambda g=gid: self._confirm_merge(self._merge_source_gid, g),
+                bg=ACCENT_GREEN, fg="#000000", font=("Helvetica", 9, "bold"),
+                bd=0, activebackground="#059669", activeforeground="white",
+                cursor="hand2", padx=8, pady=4
+            )
+            confirm_btn.pack(side=tk.RIGHT)
+
+    # ── Merge ID Functionality ────────────────────────────────────────────────
+
+    def _start_merge(self, source_gid: int) -> None:
+        self._merge_source_gid = source_gid
+        self._rebuild_gallery_grid()
+
+    def _cancel_merge(self) -> None:
+        self._merge_source_gid = None
+        self._rebuild_gallery_grid()
+
+    def _confirm_merge(self, source_gid: int, target_gid: int) -> None:
+        if source_gid == target_gid:
+            return
+
+        src_dets = self.persons.get(source_gid, {}).get("total_detections", 0)
+        tgt_dets = self.persons.get(target_gid, {}).get("total_detections", 0)
+
+        msg = (
+            f"Are you sure you want to merge ID:{source_gid:03d} into ID:{target_gid:03d}?\n\n"
+            f"• ID:{source_gid:03d} ({src_dets} detections) will be combined into ID:{target_gid:03d} ({tgt_dets} detections).\n"
+            f"• All video bounding boxes, appearances, and timelines will be reassigned.\n"
+            f"• Changes will be saved permanently to tracking_log.json."
+        )
+
+        confirm = messagebox.askyesno(
+            title="Confirm Person ID Merge",
+            message=msg,
+            parent=self.root
+        )
+
+        if confirm:
+            self._execute_merge(source_gid, target_gid)
+
+    def _execute_merge(self, source_gid: int, target_gid: int) -> None:
+        """Execute the merge of source_gid into target_gid across data structures and disk."""
+        print(f"[ReviewUI] Merging Person ID:{source_gid:03d} → ID:{target_gid:03d} …")
+
+        source_person = self.persons.get(source_gid)
+        target_person = self.persons.get(target_gid)
+
+        if not source_person or not target_person:
+            messagebox.showerror("Merge Error", "One of the selected person records was not found.", parent=self.root)
+            self._cancel_merge()
+            return
+
+        # 1. Merge appearances
+        target_apps = target_person.get("appearances", [])
+        source_apps = source_person.get("appearances", [])
+        combined_apps = target_apps + source_apps
+        combined_apps.sort(key=lambda a: (a.get("camera_id", 0), a.get("first_frame", 0)))
+        target_person["appearances"] = combined_apps
+
+        # 2. Merge cameras seen
+        cams_seen = set(target_person.get("cameras_seen", [])) | set(source_person.get("cameras_seen", []))
+        target_person["cameras_seen"] = sorted(list(cams_seen))
+
+        # 3. Sum total detections
+        target_person["total_detections"] = (
+            target_person.get("total_detections", 0) + source_person.get("total_detections", 0)
+        )
+
+        # 4. Combine up to three visual-profile thumbnails, preserving the
+        # target identity's images first and removing exact duplicates.
+        target_thumbnails = target_person.get("thumbnails_b64") or [
+            target_person.get("thumbnail_b64")
+        ]
+        source_thumbnails = source_person.get("thumbnails_b64") or [
+            source_person.get("thumbnail_b64")
+        ]
+        combined_thumbnails = []
+        for thumbnail in target_thumbnails + source_thumbnails:
+            if thumbnail and thumbnail not in combined_thumbnails:
+                combined_thumbnails.append(thumbnail)
+            if len(combined_thumbnails) == 3:
+                break
+        target_person["thumbnails_b64"] = combined_thumbnails
+        target_person["thumbnail_b64"] = (
+            combined_thumbnails[0] if combined_thumbnails else None
+        )
+
+        # 5. Update per-frame detection boxes in memory
+        for cam_id_str, frames_map in self.detections.items():
+            for frame_str, det_list in frames_map.items():
+                for det in det_list:
+                    if det.get("gid") == source_gid or det.get("global_id") == source_gid:
+                        det["gid"] = target_gid
+                        det["global_id"] = target_gid
+
+        # 6. Remove source person
+        del self.persons[source_gid]
+        if str(source_gid) in self.tracking_data.get("persons", {}):
+            del self.tracking_data["persons"][str(source_gid)]
+
+        # 7. Update tracking_data dictionary
+        self.tracking_data["persons"][str(target_gid)] = target_person
+        self.tracking_data["detections"] = self.detections
+        self._requires_dynamic_overlays = True
+
+        # 8. Save updated log to JSON file
+        log_path = self.output_dir / "tracking_log.json"
+        try:
+            with open(log_path, "w", encoding="utf-8") as f:
+                json.dump(self.tracking_data, f, indent=2)
+            print(f"[ReviewUI] Saved updated tracking log to {log_path}")
+        except Exception as e:
+            print(f"[ReviewUI] Error saving tracking log: {e}")
+
+        # Reset merge state
+        self._merge_source_gid = None
+
+        # Rebuild UI elements
+        self._rebuild_gallery_grid()
+        self._build_person_cards()
+        self._status_label.configure(
+            text=f"  {len(self.persons)} unique persons  •  {self._n_cameras} cameras  •  {self._max_frame + 1} frames"
+        )
         self._update_display()
 
+        # Feedback Toast
+        messagebox.showinfo(
+            "Merge Successful",
+            f"✓ Successfully merged Person ID:{source_gid:03d} into ID:{target_gid:03d}!\nUpdated data saved to tracking_log.json.",
+            parent=self.root
+        )
+
+    def _jump_to_person_video(self, gid: int) -> None:
+        person = self.persons.get(gid, {})
+        apps = person.get("appearances", [])
+        if apps:
+            first_app = apps[0]
+            first_frame = first_app.get("first_frame", 0)
+            cam_id = first_app.get("camera_id")
+            self._seek_to_frame(first_frame)
+            if cam_id is not None:
+                self._view_mode = "single"
+                self._selected_cam = cam_id
+                self._tracked_gid = gid
+        self._show_video_section()
+        self._apply_view_layout()
+
+    # ── View Layout & Playback Controls ────────────────────────────────────────
+
     def _set_view_grid(self) -> None:
-        """Switch to grid view of all cameras and stop auto-camera tracking."""
         self._view_mode = "grid"
         self._selected_cam = None
         self._tracked_gid = None
@@ -534,7 +1786,6 @@ class ReviewUI:
         self._rebuild_cards()
 
     def _set_view_camera(self, cam_id: int) -> None:
-        """Switch to full-screen view of a specific camera."""
         self._view_mode = "single"
         self._selected_cam = cam_id
         self._tracked_gid = None
@@ -542,16 +1793,12 @@ class ReviewUI:
         self._rebuild_cards()
 
     def _toggle_camera_fullscreen(self, cam_id: int) -> None:
-        """Toggle between full-screen camera and grid."""
         if self._view_mode == "single" and self._selected_cam == cam_id:
             self._set_view_grid()
         else:
             self._set_view_camera(cam_id)
 
-    # ── Auto-Follow Tracking Logic ────────────────────────────────────────────
-
     def _get_person_current_camera(self, gid: int, frame_idx: int) -> Optional[int]:
-        """Return the camera ID where person is currently visible at frame_idx, or None."""
         person = self.persons.get(gid, {})
         for app in person.get("appearances", []):
             if app["first_frame"] <= frame_idx <= app["last_frame"]:
@@ -559,44 +1806,34 @@ class ReviewUI:
         return None
 
     def _on_person_clicked(self, gid: int) -> None:
-        """Handle clicking a person ID card: toggle auto-follow tracking."""
         if self._tracked_gid == gid:
-            # Deselect / stop tracking
             self._stop_tracking()
             return
 
         self._tracked_gid = gid
         cam_id = self._get_person_current_camera(gid, self._current_frame)
-
         if cam_id is not None:
-            # Person is LIVE now: immediately full screen their camera
             self._view_mode = "single"
             self._selected_cam = cam_id
-        else:
-            # Person is not visible right now: wait for detection during playback
-            pass
 
         self._apply_view_layout()
         self._rebuild_cards()
 
     def _stop_tracking(self) -> None:
-        """Stop auto-tracking person."""
         self._tracked_gid = None
         self._update_tracking_status_ui()
         self._rebuild_cards()
 
     def _update_tracking_status_ui(self) -> None:
-        """Update the auto-tracking status badge and buttons in the view switcher."""
         if self._tracked_gid is not None:
             gid = self._tracked_gid
             cam_id = self._get_person_current_camera(gid, self._current_frame)
-
             if cam_id is not None:
-                text = f"🎯 Auto-Following ID:{gid:03d} on CAM {cam_id}"
+                text = f"Auto-Following ID:{gid:03d} on CAM {cam_id}"
                 bg = BG_TRACKED
                 fg = BORDER_TRACKED
             else:
-                text = f"🎯 Auto-Following ID:{gid:03d} (Waiting for detection...)"
+                text = f"Auto-Following ID:{gid:03d} (Waiting for detection...)"
                 bg = "#334155"
                 fg = TEXT_SECONDARY
 
@@ -607,10 +1844,10 @@ class ReviewUI:
             self._tracking_badge.pack_forget()
             self._tracking_stop_btn.pack_forget()
 
-    # ── Person cards ──────────────────────────────────────────────────────────
+    # ── Sidebar Person Cards ──────────────────────────────────────────────────
 
     def _build_person_cards(self) -> None:
-        """Build all person cards in the logger."""
+        self._logger_cards = {}
         for widget in self._person_list_frame.winfo_children():
             widget.destroy()
         self._thumb_refs.clear()
@@ -620,17 +1857,14 @@ class ReviewUI:
             self._build_one_person_card(person)
 
     def _build_one_person_card(self, person: dict) -> None:
-        """Build a single person card with expandable timeline & track toggle."""
         gid = person["global_id"]
         color_hex = person.get("color_hex", "#64748b")
         is_expanded = gid in self._expanded
         is_tracked = (self._tracked_gid == gid)
 
-        # Check if person is currently visible
         active_cam = self._get_person_current_camera(gid, self._current_frame)
         is_active = (active_cam is not None)
 
-        # Determine card border & background
         if is_tracked:
             border_color = BORDER_TRACKED
             bg = BG_TRACKED
@@ -641,19 +1875,15 @@ class ReviewUI:
             border_color = BORDER
             bg = BG_CARD
 
-        # Outer frame
         outer = tk.Frame(self._person_list_frame, bg=border_color, bd=0)
         outer.pack(fill=tk.X, padx=6, pady=3)
 
-        # Inner card (clickable to track)
         card = tk.Frame(outer, bg=bg, bd=0, cursor="hand2")
         card.pack(fill=tk.X, padx=(3, 1), pady=1)
 
-        # ── Main row ──────────────────────────────────────────────────────────
         main_row = tk.Frame(card, bg=bg, cursor="hand2")
         main_row.pack(fill=tk.X, padx=8, pady=8)
 
-        # Expand arrow button
         expand_text = "▼" if is_expanded else "▶"
         expand_label = tk.Label(
             main_row, text=expand_text, bg=bg, fg=TEXT_MUTED,
@@ -662,7 +1892,6 @@ class ReviewUI:
         expand_label.pack(side=tk.LEFT, padx=(0, 6))
         expand_label.bind("<Button-1>", lambda e, g=gid: self._toggle_expand(g))
 
-        # Thumbnail
         thumb_frame = tk.Frame(main_row, bg=border_color, width=40, height=52)
         thumb_frame.pack_propagate(False)
         thumb_frame.pack(side=tk.LEFT, padx=(0, 8))
@@ -677,17 +1906,15 @@ class ReviewUI:
                 thumb_label.pack(fill=tk.BOTH, expand=True)
                 self._thumb_refs[gid] = photo
             except Exception:
-                tk.Label(thumb_frame, text="👤", bg=BG_CARD, fg=TEXT_MUTED,
-                         font=("Helvetica", 16)).pack(fill=tk.BOTH, expand=True)
+                tk.Label(thumb_frame, text="N/A", bg=BG_CARD, fg=TEXT_MUTED,
+                         font=("Helvetica", 9)).pack(fill=tk.BOTH, expand=True)
         else:
-            tk.Label(thumb_frame, text="👤", bg=BG_CARD, fg=TEXT_MUTED,
-                     font=("Helvetica", 16)).pack(fill=tk.BOTH, expand=True)
+            tk.Label(thumb_frame, text="N/A", bg=BG_CARD, fg=TEXT_MUTED,
+                     font=("Helvetica", 9)).pack(fill=tk.BOTH, expand=True)
 
-        # Info column
         info = tk.Frame(main_row, bg=bg, cursor="hand2")
         info.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Row 1: swatch + ID + hit count
         row1 = tk.Frame(info, bg=bg, cursor="hand2")
         row1.pack(fill=tk.X)
 
@@ -697,53 +1924,47 @@ class ReviewUI:
 
         id_text = f"ID:{gid:03d}"
         id_label = tk.Label(
-            row1, text=id_text, bg=bg,
-            fg=TEXT_PRIMARY,
-            font=("Menlo", 12, "bold")
+            row1, text=id_text, bg=bg, fg=TEXT_PRIMARY, font=("Menlo", 12, "bold")
         )
         id_label.pack(side=tk.LEFT)
 
-        tk.Label(
+        count_label = tk.Label(
             row1, text=f"×{person.get('total_detections', 0)}",
             bg=bg, fg=TEXT_MUTED, font=("Menlo", 10)
-        ).pack(side=tk.RIGHT)
+        )
+        count_label.pack(side=tk.RIGHT)
 
-        # Row 2: Status badges (LIVE / FOLLOWING) if active
-        if is_active or is_tracked:
-            row2 = tk.Frame(info, bg=bg, cursor="hand2")
-            row2.pack(fill=tk.X, pady=(2, 0))
+        # Reserve badge space so arrivals do not shift every card below them.
+        row2 = tk.Frame(info, bg=bg, cursor="hand2", height=22)
+        row2.pack(fill=tk.X, pady=(2, 0))
+        row2.pack_propagate(False)
+        live_badge = tk.Label(
+            row2, bg="#134e2e", fg=ACCENT_GREEN,
+            font=("Menlo", 8, "bold"), padx=2, pady=1,
+        )
+        track_badge = tk.Label(
+            row2, text=" FOLLOWING ", bg="#312e81", fg=BORDER_TRACKED,
+            font=("Menlo", 8, "bold"), padx=4, pady=1,
+        )
 
-            if is_active:
-                live_frame = tk.Frame(row2, bg="#134e2e", bd=0)
-                live_frame.pack(side=tk.LEFT, padx=(0, 4))
-                tk.Label(
-                    live_frame, text=f" ● LIVE (Cam {active_cam}) ",
-                    bg="#134e2e", fg=ACCENT_GREEN,
-                    font=("Menlo", 8, "bold"), padx=2, pady=1
-                ).pack()
-
-            if is_tracked:
-                track_badge = tk.Label(
-                    row2, text=" 🎯 FOLLOWING ",
-                    bg="#312e81", fg=BORDER_TRACKED,
-                    font=("Menlo", 8, "bold"), padx=4, pady=1
-                )
-                track_badge.pack(side=tk.LEFT)
-
-        # Row 3: Camera tags
         cam_row = tk.Frame(info, bg=bg, cursor="hand2")
         cam_row.pack(fill=tk.X, pady=(3, 0))
+        self._logger_cards[gid] = {
+            "outer": outer, "thumb_frame": thumb_frame,
+            "backgrounds": [card, main_row, expand_label, info, row1,
+                            id_label, count_label, row2, cam_row],
+            "live": live_badge, "following": track_badge, "state": None,
+        }
+        self._refresh_logger_card(gid)
         for c in person.get("cameras_seen", []):
             tk.Label(
                 cam_row, text=f" Cam {c} ", bg="#1e293b", fg=TEXT_MUTED,
                 font=("Menlo", 8, "bold"), padx=3, pady=1
             ).pack(side=tk.LEFT, padx=(0, 4))
 
-        # Make card elements click to toggle tracking
         for widget in [card, main_row, thumb_frame, info, row1, id_label, cam_row]:
             widget.bind("<Button-1>", lambda e, g=gid: self._on_person_clicked(g))
 
-        # ── Expanded timeline ─────────────────────────────────────────────────
         if is_expanded:
             timeline = tk.Frame(outer, bg=BG_EXPANDED, bd=0)
             timeline.pack(fill=tk.X, padx=(3, 1), pady=(0, 1))
@@ -758,7 +1979,6 @@ class ReviewUI:
                     self._build_appearance_row(timeline, app, gid, i)
 
     def _build_appearance_row(self, parent: tk.Frame, app: dict, gid: int, idx: int) -> None:
-        """Build a single clickable appearance row in the expanded timeline."""
         row = tk.Frame(parent, bg=BG_EXPANDED, cursor="hand2")
         row.pack(fill=tk.X, padx=12, pady=2)
 
@@ -768,24 +1988,17 @@ class ReviewUI:
         duration = app.get("duration_seconds", 0)
         first_frame = app.get("first_frame", 0)
 
-        # Camera indicator
-        tk.Label(row, text=f"📷 Cam {cam_id}", bg=BG_EXPANDED, fg=ACCENT_BLUE,
+        tk.Label(row, text=f"Cam {cam_id}", bg=BG_EXPANDED, fg=ACCENT_BLUE,
                  font=("Menlo", 10, "bold")).pack(side=tk.LEFT, padx=(0, 8))
-
-        # Time range
         tk.Label(row, text=f"{first_ts} – {last_ts}", bg=BG_EXPANDED, fg=TEXT_SECONDARY,
                  font=("Menlo", 10)).pack(side=tk.LEFT, padx=(0, 8))
-
-        # Duration
         tk.Label(row, text=f"({duration}s)", bg=BG_EXPANDED, fg=TEXT_MUTED,
                  font=("Menlo", 9)).pack(side=tk.LEFT)
 
-        # "Go to" button
-        go_btn = tk.Label(row, text=" ▶ GO ", bg="#1e293b", fg=ACCENT_YELLOW,
+        go_btn = tk.Label(row, text=" GO ", bg="#1e293b", fg=ACCENT_YELLOW,
                           font=("Menlo", 9, "bold"), cursor="hand2", padx=4)
         go_btn.pack(side=tk.RIGHT, padx=4)
 
-        # Click to seek & auto-follow on that camera
         def _seek_and_follow(e=None, f=first_frame, c=cam_id, g=gid):
             self._tracked_gid = g
             self._view_mode = "single"
@@ -797,112 +2010,141 @@ class ReviewUI:
             widget.bind("<Button-1>", _seek_and_follow)
 
     def _toggle_expand(self, gid: int) -> None:
-        """Toggle expand/collapse for a person card."""
         if gid in self._expanded:
-            self._expanded.discard(gid)
+            self._expanded.remove(gid)
         else:
             self._expanded.add(gid)
-        self._rebuild_cards()
+        self._build_person_cards()
 
     def _rebuild_cards(self) -> None:
-        """Rebuild all person cards (preserving scroll position)."""
-        scroll_pos = self._canvas.yview()
-        self._build_person_cards()
-        self.root.update_idletasks()
-        if scroll_pos:
-            self._canvas.yview_moveto(scroll_pos[0])
+        if set(getattr(self, "_logger_cards", {})) != set(self.persons):
+            self._build_person_cards()
+        else:
+            for gid in self.persons:
+                self._refresh_logger_card(gid)
 
-    # ── Playback controls ─────────────────────────────────────────────────────
+    def _refresh_logger_card(self, gid: int) -> None:
+        """Update only a changed card's badges and colors; retain its image."""
+        widgets = self._logger_cards[gid]
+        camera = self._get_person_current_camera(gid, self._current_frame)
+        tracked = self._tracked_gid == gid
+        state = (camera, tracked)
+        if widgets["state"] == state:
+            return
+        widgets["state"] = state
+        border, background = (
+            (BORDER_TRACKED, BG_TRACKED) if tracked else
+            (ACCENT_GREEN, BG_ACTIVE) if camera is not None else
+            (BORDER, BG_CARD)
+        )
+        widgets["outer"].configure(bg=border)
+        widgets["thumb_frame"].configure(bg=border)
+        for widget in widgets["backgrounds"]:
+            widget.configure(bg=background)
+        widgets["live"].pack_forget()
+        widgets["following"].pack_forget()
+        if camera is not None:
+            widgets["live"].configure(text=f" ● LIVE (Cam {camera}) ")
+            widgets["live"].pack(side=tk.LEFT, padx=(0, 4))
+        if tracked:
+            widgets["following"].pack(side=tk.LEFT)
+
+    # ── Playback Controls ─────────────────────────────────────────────────────
 
     def _toggle_play(self) -> None:
-        if self._playing:
-            self._playing = False
-            self._btn_play.configure(text=" ▶ ")
-        else:
-            self._playing = True
-            self._btn_play.configure(text=" ⏸ ")
+        self._playing = not self._playing
+        self._btn_play.configure(text="⏸ Pause" if self._playing else "▶ Play")
 
     def _step_back(self) -> None:
         self._playing = False
-        self._btn_play.configure(text=" ▶ ")
+        self._btn_play.configure(text="▶ Play")
         self._seek_to_frame(max(0, self._current_frame - 1))
 
     def _step_forward(self) -> None:
         self._playing = False
-        self._btn_play.configure(text=" ▶ ")
+        self._btn_play.configure(text="▶ Play")
         self._seek_to_frame(min(self._max_frame, self._current_frame + 1))
 
-    def _on_seek(self, value) -> None:
-        frame = int(value)
-        if frame != self._current_frame:
-            self._seek_to_frame(frame)
+    def _on_seek(self, value: str) -> None:
+        frame_idx = int(value)
+        if self._updating_seek_slider or frame_idx == self._current_frame:
+            return
+        self._seek_to_frame(frame_idx)
 
     def _seek_to_frame(self, frame_idx: int) -> None:
-        """Seek all cameras to a specific frame."""
-        self._current_frame = max(0, min(frame_idx, self._max_frame))
-        self._seek_var.set(self._current_frame)
+        self._current_frame = frame_idx
+        self._set_seek_slider(frame_idx)
         self._handle_auto_tracking()
         self._update_display()
         self._rebuild_cards()
 
-    # ── Display update & Auto-following ───────────────────────────────────────
+    def _set_seek_slider(self, frame_idx: int) -> None:
+        """Update the slider without treating playback as a user seek."""
+        self._updating_seek_slider = True
+        try:
+            self._seek_var.set(frame_idx)
+        finally:
+            self._updating_seek_slider = False
+
+    def _active_person_signature(self) -> Tuple[Tuple[int, int], ...]:
+        """Compact state used to refresh cards only when LIVE badges change."""
+        active = []
+        for gid in self.persons:
+            cam_id = self._get_person_current_camera(gid, self._current_frame)
+            if cam_id is not None:
+                active.append((gid, cam_id))
+        return tuple(sorted(active))
 
     def _handle_auto_tracking(self) -> None:
-        """If auto-following a person, dynamically switch camera to where they appear."""
-        if self._tracked_gid is None:
-            return
-
-        cur_cam = self._get_person_current_camera(self._tracked_gid, self._current_frame)
-        if cur_cam is not None:
-            # Person is detected on cur_cam! Full-screen that camera
-            if self._view_mode != "single" or self._selected_cam != cur_cam:
-                self._view_mode = "single"
-                self._selected_cam = cur_cam
-                self._apply_view_layout()
+        if self._tracked_gid is not None:
+            cam_id = self._get_person_current_camera(self._tracked_gid, self._current_frame)
+            if cam_id is not None:
+                if self._selected_cam != cam_id or self._view_mode != "single":
+                    self._view_mode = "single"
+                    self._selected_cam = cam_id
+                    self._apply_view_layout()
 
     def _update_display(self) -> None:
-        """Update camera feeds and UI for the current frame."""
-        if self._view_mode == "single" and self._selected_cam is not None:
-            cams_to_render = [self._selected_cam]
-        else:
-            cams_to_render = sorted(self._caps.keys())
+        """Render current video frames to the camera widgets."""
+        if self._main_section != "video":
+            return
+
+        cams_to_render = (
+            [self._selected_cam]
+            if self._view_mode == "single" and self._selected_cam is not None
+            else list(self._caps.keys())
+        )
 
         for cam_id in cams_to_render:
-            frame = self._read_frame(cam_id, self._current_frame)
-            if frame is None:
-                continue
-
             label = self._cam_labels.get(cam_id)
             if label is None:
                 continue
 
-            lw = label.winfo_width()
-            lh = label.winfo_height()
-            if lw < 10 or lh < 10:
-                if self._view_mode == "single":
-                    lw, lh = 1000, 600
-                else:
-                    lw, lh = 540, 304
+            frame = self._read_frame(cam_id, self._current_frame)
+            if frame is None:
+                continue
+
+            w = max(label.winfo_width(), 100)
+            h = max(label.winfo_height(), 100)
 
             fh, fw = frame.shape[:2]
-            scale = min(lw / fw, lh / fh)
-            new_w = max(1, int(fw * scale))
-            new_h = max(1, int(fh * scale))
+            scale = min(w / fw, h / fh)
+            nw = max(1, int(fw * scale))
+            nh = max(1, int(fh * scale))
 
-            resized = cv2.resize(frame, (new_w, new_h))
+            resized = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
             rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(rgb)
-            photo = ImageTk.PhotoImage(img)
+            photo = ImageTk.PhotoImage(image=img)
 
             label.configure(image=photo)
+            label.image = photo
             self._photo_refs[cam_id] = photo
 
-        # Update frame counter and time
         self._frame_label.configure(text=f"Frame: {self._current_frame}")
         current_ts = self._frame_to_timestamp(self._current_frame)
         total_ts = self._frame_to_timestamp(self._max_frame)
         self._time_label.configure(text=f"{current_ts} / {total_ts}")
-
         self._update_tracking_status_ui()
 
     def _frame_to_timestamp(self, frame: int) -> str:
@@ -913,43 +2155,49 @@ class ReviewUI:
         return f"{m}:{s:02d}"
 
     def _on_mousewheel(self, event):
-        self._canvas.yview_scroll(-1 * (event.delta // 120 or event.delta), "units")
+        if getattr(self, "_sidebar_mode", "logger") == "ai" and hasattr(self, "_ai_text"):
+            self._ai_text.yview_scroll(-1 * (event.delta // 120 or event.delta), "units")
+        elif hasattr(self, "_canvas"):
+            self._canvas.yview_scroll(-1 * (event.delta // 120 or event.delta), "units")
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     def _tick(self) -> None:
-        """Main update loop, called from tkinter's after()."""
+        """Main update loop."""
+        tick_started = time.perf_counter()
         if self._playing:
             next_frame = self._current_frame + 1
             if next_frame > self._max_frame:
                 self._playing = False
-                self._btn_play.configure(text=" ▶ ")
+                self._btn_play.configure(text="▶ Play")
             else:
                 self._current_frame = next_frame
-                self._seek_var.set(self._current_frame)
+                self._set_seek_slider(self._current_frame)
                 self._handle_auto_tracking()
                 self._update_display()
 
-                # Rebuild person cards every 15 frames (for active highlighting)
-                if self._current_frame % 15 == 0:
-                    self._rebuild_cards()
+                # Rebuilding every Tk widget several times a second is costly.
+                # The cards only need refreshing when a LIVE camera changes.
+                signature = self._active_person_signature()
+                if signature != self._last_active_signature:
+                    if getattr(self, "_sidebar_mode", "logger") == "logger":
+                        self._rebuild_cards()
+                        self._last_active_signature = signature
+                    else:
+                        self._last_active_signature = None
 
-        # Schedule at playback FPS
-        delay = max(10, int(1000 / self._playback_fps))
+        frame_budget_ms = 1000.0 / max(self._playback_fps, 1.0)
+        work_ms = (time.perf_counter() - tick_started) * 1000.0
+        delay = max(1, int(frame_budget_ms - work_ms))
         self.root.after(delay, self._tick)
 
     def run(self) -> None:
-        """Start the review UI. MUST be called from the main thread."""
+        """Start the review UI."""
         print(f"[ReviewUI] ✦ Review dashboard opened  ({len(self.persons)} persons, {self._n_cameras} cameras)")
-
-        # Show initial frame
         self._update_display()
-
-        # Start tick loop
         self.root.after(100, self._tick)
         self.root.mainloop()
 
-        # Cleanup
         for cap in self._caps.values():
             cap.release()
         for cap in self._raw_caps.values():
@@ -960,3 +2208,19 @@ class ReviewUI:
             self.root.destroy()
         except tk.TclError:
             pass
+
+
+if __name__ == "__main__":
+    from src.config import OUTPUT_DIR
+    from src.tracking_log import TrackingLog
+
+    log_path = OUTPUT_DIR / "tracking_log.json"
+    if not log_path.exists():
+        print(f"[ReviewUI] No tracking log found at {log_path}")
+        print(f"           Run pipeline first: python -m src.main")
+        exit(1)
+
+    print(f"[ReviewUI] Loading tracking log from {log_path} …")
+    tracking_data = TrackingLog.load(str(log_path))
+    ui = ReviewUI(tracking_data=tracking_data, output_dir=str(OUTPUT_DIR))
+    ui.run()

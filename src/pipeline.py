@@ -122,7 +122,8 @@ class CameraWorker:
 
         # Cache: local_id → global_id between Re-ID intervals
         self._id_cache: Dict[int, int] = {}
-        self._photo_taken_for_local_id: Set[int] = set()
+        # local track ID -> last frame offered as a thumbnail candidate
+        self._last_thumbnail_frame: Dict[int, int] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -272,11 +273,18 @@ class CameraWorker:
                 matched = self.gallery.match_batch(self.camera_id, self.frame_idx, batch_items)
                 self._id_cache.update(matched)
 
-                # Send thumbnails for new appearances (1 photo per local track)
+                # Periodically offer crops so the gallery can retain three
+                # strong, varied views instead of only the track's first frame.
+                thumbnail_interval = max(5, self.reid_interval)
                 for tid, gid in matched.items():
-                    if tid in local_id_to_crop and tid not in self._photo_taken_for_local_id:
+                    last_thumbnail_frame = self._last_thumbnail_frame.get(tid)
+                    is_thumbnail_due = (
+                        last_thumbnail_frame is None
+                        or self.frame_idx - last_thumbnail_frame >= thumbnail_interval
+                    )
+                    if tid in local_id_to_crop and is_thumbnail_due:
                         self.gallery.add_thumbnail_to_entry(gid, local_id_to_crop[tid], self.camera_id)
-                        self._photo_taken_for_local_id.add(tid)
+                        self._last_thumbnail_frame[tid] = self.frame_idx
 
             # ── Periodic gallery cleanup ─────────────────────────────────────
             if self.frame_idx % 60 == 0:

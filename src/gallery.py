@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import ClassVar, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import cv2
@@ -39,6 +39,8 @@ import cv2
 
 @dataclass
 class GalleryEntry:
+    MAX_THUMBNAILS: ClassVar[int] = 3
+
     global_id: int
     embeddings: List[np.ndarray] = field(default_factory=list)  # unit-norm feature bank
     last_seen_frame: int = 0                                    # for TTL expiry
@@ -46,18 +48,64 @@ class GalleryEntry:
     hit_count: int = 1                                          # number of detections
     cameras_seen: Set[int] = field(default_factory=set)         # set of camera IDs
     thumbnails: List[np.ndarray] = field(default_factory=list)  # list of cropped images
+    thumbnail_camera_ids: List[int] = field(default_factory=list)
+    thumbnail_scores: List[float] = field(default_factory=list)
 
-    def add_thumbnail(self, crop: np.ndarray) -> None:
-        """Saves a resized thumbnail of the person (one per appearance)."""
+    def add_thumbnail(self, crop: np.ndarray, camera_id: int) -> None:
+        """Keep the three best crops, preferring coverage across cameras."""
         if crop is None or crop.size == 0:
             return
-        # Resize to a consistent height (e.g., 128px) while maintaining aspect ratio
+
         h, w = crop.shape[:2]
-        target_h = 128
+        if h <= 0 or w <= 0:
+            return
+
+        # Larger, sharper crops are generally more useful to the vision model.
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        quality = float(h * w) * (1.0 + min(sharpness, 1000.0) / 1000.0)
+
+        # Keep enough source detail for clothing/accessory inspection while
+        # avoiding large tracking-log payloads.
+        target_h = min(256, h)
         target_w = int(w * (target_h / h))
-        if target_w > 0:
-            resized = cv2.resize(crop, (target_w, target_h))
+        if target_w <= 0:
+            return
+        resized = cv2.resize(crop, (target_w, target_h), interpolation=cv2.INTER_AREA)
+
+        if len(self.thumbnails) < self.MAX_THUMBNAILS:
             self.thumbnails.append(resized)
+            self.thumbnail_camera_ids.append(camera_id)
+            self.thumbnail_scores.append(quality)
+            return
+
+        camera_counts = {
+            cid: self.thumbnail_camera_ids.count(cid)
+            for cid in set(self.thumbnail_camera_ids)
+        }
+
+        duplicate_indices: List[int] = []
+        if camera_id not in camera_counts:
+            # Make room for a new viewpoint by replacing the weakest duplicate
+            # camera view. If all views are already from different cameras,
+            # replace the weakest crop only when the new one is better.
+            duplicate_indices = [
+                idx for idx, cid in enumerate(self.thumbnail_camera_ids)
+                if camera_counts[cid] > 1
+            ]
+            candidate_indices = duplicate_indices or list(range(len(self.thumbnails)))
+        else:
+            candidate_indices = [
+                idx for idx, cid in enumerate(self.thumbnail_camera_ids)
+                if cid == camera_id
+            ]
+
+        replace_idx = min(candidate_indices, key=lambda idx: self.thumbnail_scores[idx])
+        adds_new_camera = camera_id not in camera_counts and bool(duplicate_indices)
+        if adds_new_camera or quality > self.thumbnail_scores[replace_idx]:
+            self.thumbnails[replace_idx] = resized
+            self.thumbnail_camera_ids[replace_idx] = camera_id
+            self.thumbnail_scores[replace_idx] = quality
 
     def similarity(self, query_emb: np.ndarray) -> float:
         """Maximum cosine similarity across all stored exemplars for this person."""
@@ -108,16 +156,28 @@ class GalleryEntry:
             return False
 
         if best_sim >= dup_thresh:
-            # Refine existing exemplar with EMA
-            updated = (1.0 - ema_alpha) * self.embeddings[best_idx] + ema_alpha * new_emb
+            # Refine existing exemplar with EMA.
+            # Cap ema_alpha so that high-frequency same-camera updates don't cause
+            # runaway drift over thousands of frames (e.g. lighting change accumulates).
+            safe_alpha = min(ema_alpha, 0.10)
+            updated = (1.0 - safe_alpha) * self.embeddings[best_idx] + safe_alpha * new_emb
             updated /= (np.linalg.norm(updated) + 1e-8)
             self.embeddings[best_idx] = updated.astype(np.float32)
         elif len(self.embeddings) < max_exemplars:
             # Add as new appearance variation (e.g. back view, different lighting, or new camera angle)
             self.embeddings.append(new_emb.copy())
         else:
-            # Bank is full: replace the closest existing exemplar (most redundant w.r.t. new_emb)
-            self.embeddings[best_idx] = new_emb.copy()
+            # Bank is full: replace the LEAST DIVERSE exemplar rather than the closest to
+            # new_emb.  "Least diverse" = the one that is most similar to all OTHER exemplars
+            # (i.e. most redundant), so we preserve the widest spread of viewpoints.
+            # This prevents the bank from converging to a narrow pose cluster over time.
+            redundancy = []
+            for i, e in enumerate(self.embeddings):
+                others = [self.embeddings[j] for j in range(len(self.embeddings)) if j != i]
+                avg_sim_to_others = float(np.mean([np.dot(e, o) for o in others])) if others else 0.0
+                redundancy.append(avg_sim_to_others)
+            replace_idx = int(np.argmax(redundancy))  # most redundant slot
+            self.embeddings[replace_idx] = new_emb.copy()
 
         return True
 
@@ -216,9 +276,11 @@ class GlobalGallery:
                         # Verify identity stability if embedding is available
                         current_sim = entry.similarity(emb) if emb is not None else 1.0
 
-                        # If similarity to the assigned person is very low (< 0.50), don't blindly lock-in
-                        # Instead, allow it to be re-evaluated in Phase 2
-                        if emb is not None and current_sim < 0.50:
+                        # If similarity to the assigned person drops below threshold, don't blindly
+                        # lock-in — re-evaluate in Phase 2 to avoid carrying a drifted/wrong ID
+                        # forward for the rest of the video.  0.58 is tighter than the old 0.50
+                        # floor so contamination is caught earlier.
+                        if emb is not None and current_sim < 0.58:
                             del self._local_map[key]
                             unmapped_detections.append((local_id, emb))
                             continue
@@ -364,7 +426,7 @@ class GlobalGallery:
             if gid in self._entries:
                 entry = self._entries[gid]
                 entry.cameras_seen.add(camera_id)
-                entry.add_thumbnail(crop)
+                entry.add_thumbnail(crop, camera_id)
 
     def get_all_entries_snapshot(self) -> List[dict]:
         """
@@ -377,12 +439,20 @@ class GlobalGallery:
         with self._lock:
             for gid in sorted(self._entries.keys()):
                 entry = self._entries[gid]
-                # Encode the first thumbnail as base64 JPEG (if available)
-                thumb_b64: Optional[str] = None
-                if entry.thumbnails:
-                    ret, buf = cv2.imencode(".jpg", entry.thumbnails[0])
+                # Encode up to three selected thumbnails. ``thumbnail_b64`` is
+                # retained for compatibility with existing UI consumers.
+                thumbnails_b64: List[str] = []
+                ranked_indices = sorted(
+                    range(len(entry.thumbnails)),
+                    key=lambda idx: entry.thumbnail_scores[idx],
+                    reverse=True,
+                )[:GalleryEntry.MAX_THUMBNAILS]
+                for idx in ranked_indices:
+                    thumbnail = entry.thumbnails[idx]
+                    ret, buf = cv2.imencode(".jpg", thumbnail)
                     if ret:
-                        thumb_b64 = base64.b64encode(buf).decode("utf-8")
+                        thumbnails_b64.append(base64.b64encode(buf).decode("utf-8"))
+                thumb_b64: Optional[str] = thumbnails_b64[0] if thumbnails_b64 else None
 
                 snapshot.append({
                     "global_id": entry.global_id,
@@ -391,6 +461,7 @@ class GlobalGallery:
                     "last_camera_id": entry.last_camera_id,
                     "last_seen_frame": entry.last_seen_frame,
                     "thumbnail_b64": thumb_b64,
+                    "thumbnails_b64": thumbnails_b64,
                 })
         return snapshot
 

@@ -35,13 +35,7 @@ import numpy as np
 
 def main() -> None:
     from src.video_loader import parse_args, get_video_paths
-    from src.config import DEVICE, REID_DEVICE, REID_EVERY_N_FRAMES, TRANSREID_WEIGHTS
-    from src.config import REID_THRESHOLD, GALLERY_TTL_FRAMES, YOLO_MODEL_NAME
-    from src.config import REID_THRESHOLD_MATRIX, OUTPUT_DIR
-    from src.dispatcher import DetectionDispatcher
-    from src.reid_model import TransReIDEncoder
-    from src.gallery import GlobalGallery
-    from src.pipeline import CameraWorker
+    from src.config import OUTPUT_DIR
     from src.tracking_log import TrackingLog
 
     args          = parse_args()
@@ -65,6 +59,14 @@ def main() -> None:
         return
 
     # ── Phase 1: Pre-process (headless) ───────────────────────────────────────
+    from src.config import DEVICE, REID_DEVICE, REID_EVERY_N_FRAMES, TRANSREID_WEIGHTS
+    from src.config import REID_THRESHOLD, GALLERY_TTL_FRAMES, YOLO_MODEL_NAME
+    from src.config import REID_THRESHOLD_MATRIX
+    from src.dispatcher import DetectionDispatcher
+    from src.reid_model import TransReIDEncoder
+    from src.gallery import GlobalGallery
+    from src.pipeline import CameraWorker
+
     video_paths   = get_video_paths(args)
     device        = args.device or DEVICE
     reid_interval = args.reid_interval or REID_EVERY_N_FRAMES

@@ -30,7 +30,6 @@ tqdm>=4.65.0
 # Web UI
 flask>=3.0.0
 
-# OpenAI API Integration
+# AI Intelligence & Vision
 openai>=1.0.0
 python-dotenv>=1.0.0
-

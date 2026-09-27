@@ -224,6 +224,7 @@ class TrackingLog:
                     "global_id": gid,
                     "color_hex": get_color_hex(gid),
                     "thumbnail_b64": gallery_entry["thumbnail_b64"] if gallery_entry else None,
+                    "thumbnails_b64": gallery_entry.get("thumbnails_b64", []) if gallery_entry else [],
                     "total_detections": gallery_entry["hit_count"] if gallery_entry else total_detections,
                     "cameras_seen": gallery_entry["cameras_seen"] if gallery_entry else sorted(set(a.camera_id for a in appearances)),
                     "appearances": [a.to_dict() for a in appearances],
