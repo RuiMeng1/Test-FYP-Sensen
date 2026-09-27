@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import dotenv
+from src.action_events import load_actions, timestamp
 
 # Load .env from project root
 dotenv.load_dotenv(override=True)
@@ -54,6 +55,7 @@ class AIAssistant:
 
         # Chat history for multi-turn conversation
         self.conversation_history: List[dict] = []
+        self.action_data = load_actions(tracking_data, self.output_dir)
 
     def reload_config(self) -> None:
         """Reload .env in case user updated the API key while UI was open."""
@@ -308,6 +310,12 @@ class AIAssistant:
             "",
             "## Cameras Information:"
         ]
+        lines.append('Action analysis status: ' + self.action_data['status'])
+        lines.append('Action coverage: ' + json.dumps(self.action_data.get('coverage', [])))
+        lines.append('Action events are model suggestions, not verified facts. Scores are not calibrated probabilities. '
+                     'Sitting/standing are postures, not proof of a sit-down/stand-up transition. '
+                     'Possible falls require human review. Missing events do not establish that nothing happened. '
+                     'Only answer action questions within the listed coverage; use camera/time citations.')
 
         for cid, cinfo in sorted(cameras.items(), key=lambda x: int(x[0])):
             fps = cinfo.get("fps", 25.0)
@@ -342,6 +350,14 @@ class AIAssistant:
             lines.append(f"- Total Frame Sightings: {total_dets}")
             lines.append(f"- Timeline Sightings: {app_str}")
             lines.append(f"- Visual Profile & Clothing: {clothing_desc}")
+            for event in self.action_data.get('events', []):
+                if event['person_id'] == gid:
+                    lines.append(
+                        f"- Suggested action: {event['action']}; "
+                        f"[Cam {event['camera_id']} @ {timestamp(event['start_seconds'])}] to "
+                        f"{timestamp(event['end_seconds'])}; score {event['model_score']:.2f}; "
+                        f"status {event['review_status']}."
+                    )
             lines.append("")
 
         return "\n".join(lines)

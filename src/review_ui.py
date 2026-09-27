@@ -30,6 +30,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from src.ai_assistant import AIAssistant, parse_camera_timestamp, parse_person_ids
+from src.action_events import timestamp
+from src.action_labels import LABELS, display_name, visible_actions
 
 # Path to application logo asset
 _LOGO_PATH = Path(__file__).parent / "assets" / "sensen_logo.png"
@@ -173,6 +175,12 @@ class ReviewUI:
 
         # AI Assistant engine & state
         self.ai_assistant = AIAssistant(self.tracking_data, self.output_dir)
+        self._overlay_actions = set(LABELS.values())
+        try:
+            saved = json.loads((self.output_dir / 'action_display_settings.json').read_text())
+            self._overlay_actions = set(saved['actions']) & set(LABELS.values())
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
         self._sidebar_mode = "logger"             # "logger" or "ai"
         self._pending_ai_query: Optional[str] = None
 
@@ -526,6 +534,11 @@ class ReviewUI:
         self._apply_view_layout()
 
     def _build_view_switcher(self, parent: tk.Frame) -> None:
+        settings_bar = tk.Frame(parent, bg=BG_PRIMARY)
+        settings_bar.pack(fill=tk.X, padx=8, pady=(6, 0))
+        ProfessionalButton(settings_bar, text='Action display settings…',
+                           command=self._open_action_settings, bg=BG_CARD,
+                           fg=TEXT_PRIMARY).pack(side=tk.RIGHT)
         bar = tk.Frame(parent, bg="#0f172a", height=42)
         bar.pack(fill=tk.X, padx=8, pady=(8, 0))
         bar.pack_propagate(False)
@@ -1733,6 +1746,12 @@ class ReviewUI:
         self.tracking_data["persons"][str(target_gid)] = target_person
         self.tracking_data["detections"] = self.detections
         self._requires_dynamic_overlays = True
+        # A merge changes identity attribution: invalidate action suggestions
+        # until the offline analysis is rerun against the edited tracking log.
+        self.ai_assistant.action_data = {
+            'events': [], 'status': 'Action results invalidated by an ID merge. Rerun action analysis.'
+        }
+        self.ai_assistant.clear_history()
 
         # 8. Save updated log to JSON file
         log_path = self.output_dir / "tracking_log.json"
@@ -1978,6 +1997,25 @@ class ReviewUI:
                 for i, app in enumerate(appearances):
                     self._build_appearance_row(timeline, app, gid, i)
 
+            tk.Label(timeline, text='Suggested actions · unreviewed',
+                     bg=BG_EXPANDED, fg=ACCENT_PURPLE,
+                     font=('Helvetica', 10, 'bold')).pack(anchor='w', padx=12, pady=(8, 3))
+            events = [event for event in self.ai_assistant.action_data.get('events', [])
+                      if event['person_id'] == gid]
+            if not events:
+                tk.Label(timeline, text=('No action suggestions available for this person.\n'
+                                        + self.ai_assistant.action_data['status']),
+                         bg=BG_EXPANDED, fg=TEXT_MUTED, wraplength=350,
+                         justify=tk.LEFT).pack(anchor='w', padx=12, pady=3)
+            for event in events:
+                label = (f"{event['action'].replace('_', ' ').title()} · Cam {event['camera_id']} · "
+                         f"{timestamp(event['start_seconds'])}–{timestamp(event['end_seconds'])}")
+                ProfessionalButton(
+                    timeline, text=label, bg=BG_CARD, fg=TEXT_PRIMARY,
+                    command=lambda e=event, g=gid: self.jump_to_timestamp(
+                        e['camera_id'], e['evidence_frame'] / self.cameras[e['camera_id']]['fps'], g),
+                ).pack(anchor='w', padx=12, pady=3)
+
     def _build_appearance_row(self, parent: tk.Frame, app: dict, gid: int, idx: int) -> None:
         row = tk.Frame(parent, bg=BG_EXPANDED, cursor="hand2")
         row.pack(fill=tk.X, padx=12, pady=2)
@@ -2133,6 +2171,7 @@ class ReviewUI:
             nh = max(1, int(fh * scale))
 
             resized = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
+            self._draw_action_labels(resized, cam_id, self._current_frame, nw / fw, nh / fh)
             rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(rgb)
             photo = ImageTk.PhotoImage(image=img)
@@ -2146,6 +2185,101 @@ class ReviewUI:
         total_ts = self._frame_to_timestamp(self._max_frame)
         self._time_label.configure(text=f"{current_ts} / {total_ts}")
         self._update_tracking_status_ui()
+
+    def _open_action_settings(self) -> None:
+        existing = getattr(self, '_action_settings_window', None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            return
+        window = tk.Toplevel(self.root)
+        self._action_settings_window = window
+        window.title('Camera action display')
+        window.geometry('470x590')
+        window.configure(bg=BG_SECONDARY)
+        tk.Label(window, text='Choose actions to show on footage', bg=BG_SECONDARY,
+                 fg=TEXT_PRIMARY, font=('Helvetica', 14, 'bold')).pack(pady=(16, 8))
+        tk.Label(window, text='Click to toggle multiple actions. All saved actions stay in the logger.\n'
+                 'Labels are unreviewed model suggestions.', wraplength=430,
+                 bg=BG_SECONDARY, fg=TEXT_SECONDARY).pack(padx=12, pady=(0, 8))
+        supported = set(self.ai_assistant.action_data.get('supported_actions', []))
+        if supported != set(LABELS.values()):
+            tk.Label(window, text='Rerun action analysis to generate all 60 action types.',
+                     bg=BG_SECONDARY, fg=ACCENT_YELLOW).pack(pady=4)
+        options = sorted(LABELS.values(), key=display_name)
+        container = tk.Frame(window, bg=BG_SECONDARY)
+        container.pack(fill=tk.BOTH, expand=True, padx=16)
+        choices = tk.Listbox(container, selectmode=tk.MULTIPLE, exportselection=False,
+                             bg=BG_CARD, fg=TEXT_PRIMARY, selectbackground=ACCENT_BLUE,
+                             selectforeground='white', font=('Helvetica', 11), bd=0)
+        scrollbar = ttk.Scrollbar(container, command=choices.yview)
+        choices.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        choices.pack(fill=tk.BOTH, expand=True)
+        for index, action in enumerate(options):
+            choices.insert(tk.END, display_name(action))
+            if action in self._overlay_actions:
+                choices.selection_set(index)
+        buttons = tk.Frame(window, bg=BG_SECONDARY)
+        buttons.pack(fill=tk.X, padx=16, pady=12)
+        ProfessionalButton(buttons, text='All', command=lambda: choices.selection_set(0, tk.END)).pack(side=tk.LEFT)
+        ProfessionalButton(buttons, text='None', command=lambda: choices.selection_clear(0, tk.END)).pack(side=tk.LEFT, padx=6)
+
+        def apply():
+            selected = {options[index] for index in choices.curselection()}
+            try:
+                (self.output_dir / 'action_display_settings.json').write_text(
+                    json.dumps({'actions': sorted(selected)}, indent=2))
+            except OSError as error:
+                messagebox.showerror('Settings could not be saved', str(error), parent=window)
+                return
+            self._overlay_actions = selected
+            window.destroy()
+            self._update_display()
+
+        ProfessionalButton(buttons, text='Apply', command=apply,
+                           bg=ACCENT_BLUE, fg='white').pack(side=tk.RIGHT)
+
+    def _draw_action_labels(self, image, camera_id, frame_idx, scale_x, scale_y):
+        fps = self.cameras[camera_id].get('fps', 25)
+        if fps <= 0 or not self._overlay_actions:
+            return
+        events = visible_actions(self.ai_assistant.action_data.get('events', []),
+                                 self._overlay_actions, camera_id, frame_idx / fps)
+        if not events:
+            return
+        # Use the current box, not the event's old evidence box. Suppress labels
+        # for duplicate global IDs so an action isn't painted on both people.
+        boxes = {}
+        for detection in self.detections.get(str(camera_id), {}).get(str(frame_idx), []):
+            boxes.setdefault(detection['gid'], []).append(detection['bbox'])
+        actions = {}
+        for event in events:
+            gid = event['person_id']
+            if len(boxes.get(gid, [])) != 1 or (self._tracked_gid is not None and gid != self._tracked_gid):
+                continue
+            actions.setdefault(gid, set()).add(display_name(event['action']))
+        height, width = image.shape[:2]
+        for gid, names in actions.items():
+            x1, y1, _, _ = boxes[gid][0]
+            # Wrap by measured pixel width; keep labels inside the camera tile.
+            text = f'ID:{gid:03d} suggested: ' + ', '.join(sorted(names))
+            lines, line = [], ''
+            for word in text.split():
+                candidate = (line + ' ' + word).strip()
+                if line and cv2.getTextSize(candidate, cv2.FONT_HERSHEY_SIMPLEX, .43, 1)[0][0] > width-16:
+                    lines.append(line)
+                    line = word
+                else:
+                    line = candidate
+            lines.append(line)
+            block_height = min(height, 20 * len(lines) + 6)
+            block_width = min(width, max(cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, .43, 1)[0][0] for t in lines)+12)
+            x = max(0, min(int(x1*scale_x), width-block_width))
+            y = max(0, min(int(y1*scale_y)+28, height-block_height))
+            cv2.rectangle(image, (x, y), (x+block_width, y+block_height), (38, 28, 20), -1)
+            for index, line in enumerate(lines):
+                cv2.putText(image, line, (x+5, y+17+index*20), cv2.FONT_HERSHEY_SIMPLEX,
+                            .43, (100, 225, 255), 1, cv2.LINE_AA)
 
     def _frame_to_timestamp(self, frame: int) -> str:
         if self._playback_fps <= 0:
