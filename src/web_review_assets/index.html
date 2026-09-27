@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Sensen • Review workspace</title>
+    <link rel="stylesheet" href="/assets/review.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <img class="brandLogo" src="/assets/sensen-logo.png" alt="sensen.ai — the Live Awareness platform" width="600" height="300" />
+      </div>
+      <nav>
+        <button id="workspaceTab" class="selected">Workspace</button
+        ><button id="galleryTab">People gallery</button>
+      </nav>
+      <div class="headerActions">
+        <button id="settingsButton">Display settings</button
+        ><a class="button" href="/api/report.pdf">Export PDF ↗</a>
+      </div>
+    </header>
+    <div id="notice" role="status">Loading recording…</div>
+    <main id="workspace">
+      <section class="footage">
+        <div class="sectionHead">
+          <div>
+            <span class="eyebrow">RECORDING EXPLORER</span>
+            <h1>Every camera. One timeline.</h1>
+          </div>
+          <span id="summary" class="pill"></span>
+        </div>
+        <div id="cameraButtons" class="toolbar"></div>
+        <div id="followBar" hidden>
+          <span id="followText"></span
+          ><button id="stopFollow">Stop following ×</button>
+        </div>
+        <div id="cameras" class="cameraGrid"></div>
+        <div class="transport">
+          <div class="transportButtons">
+            <button id="previous" title="Previous frame">|◀</button
+            ><button id="play" class="primary">▶ Play</button
+            ><button id="next" title="Next frame">▶|</button
+            ><label
+              >Speed
+              <select id="speed">
+                <option value="0.5">0.5×</option>
+                <option value="1" selected>1×</option>
+                <option value="2">2×</option>
+              </select></label
+            ><output id="clock">0:00 / 0:00</output>
+          </div>
+          <input
+            id="seek"
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            value="0"
+            aria-label="Playback time"
+          />
+          <div class="subtle">
+            Space to play / pause · Arrow keys to step · Double-click a camera
+            to focus
+          </div>
+        </div>
+      </section>
+      <aside>
+        <div class="sideTabs">
+          <button id="peopleTab" class="selected">Person timeline</button
+          ><button id="aiTab">AI assistant</button>
+        </div>
+        <section id="peoplePanel">
+          <div class="panelHead">
+            <h2>People in this recording</h2>
+            <input
+              id="search"
+              type="search"
+              placeholder="Find a person ID…"
+              aria-label="Find a person"
+            />
+          </div>
+          <div id="people"></div>
+        </section>
+        <section id="aiPanel" hidden>
+          <div class="panelHead">
+            <h2>Ask your footage</h2>
+            <button id="clearChat">Clear chat</button>
+            <p class="subtle">
+              Answers from recorded sightings, appearance profiles and suggested
+              actions.
+            </p>
+          </div>
+          <div id="messages" aria-live="polite"></div>
+          <form id="chatForm">
+            <textarea
+              id="prompt"
+              rows="2"
+              placeholder="Where was Person 2?"
+              aria-label="Question"
+            ></textarea
+            ><button id="send" class="primary">Ask ↗</button>
+          </form>
+        </section>
+      </aside>
+    </main>
+    <section id="gallery" hidden>
+      <div class="sectionHead">
+        <div>
+          <span class="eyebrow">IDENTITY REVIEW</span>
+          <h1>People gallery</h1>
+        </div>
+        <p class="subtle">
+          Inspect appearances or combine duplicate identities.
+        </p>
+      </div>
+      <div id="galleryCards"></div>
+    </section>
+    <dialog id="settings">
+      <form method="dialog">
+        <div class="sectionHead">
+          <h2>Camera display</h2>
+          <button aria-label="Close">×</button>
+        </div>
+      </form>
+      <p class="subtle">
+        Choose which suggested actions appear over footage. All saved events
+        stay in the logger and assistant.
+      </p>
+      <label
+        ><input id="boxesToggle" type="checkbox" checked /> Show identity
+        boxes</label
+      >
+      <div class="toolbar">
+        <button id="allActions">Select all</button
+        ><button id="noActions">Select none</button>
+      </div>
+      <div id="actionChoices"></div>
+      <button id="saveSettings" class="primary">Apply display settings</button>
+    </dialog>
+    <dialog id="mergeDialog">
+      <h2>Merge duplicate identity</h2>
+      <p id="mergeDescription"></p>
+      <label
+        >Keep person
+        <select id="mergeTarget"></select
+      ></label>
+      <p class="subtle">
+        Sightings and detections will be reassigned and saved to the tracking
+        log. Action analysis must be rerun afterward. A backup of the log is
+        kept.
+      </p>
+      <div class="toolbar">
+        <button id="cancelMerge">Cancel</button
+        ><button id="confirmMerge" class="danger">Confirm merge</button>
+      </div>
+    </dialog>
+    <script src="/assets/review.js" defer></script>
+  </body>
+</html>

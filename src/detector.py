@@ -56,7 +56,7 @@ class PersonDetector:
             source=frame,
             persist=True,           # Maintain tracker state across frames
             classes=[0],            # Class 0 = person only
-            conf=0.8,              # Minimum detection confidence
+            conf=0.75,             # Minimum detection confidence
             iou=0.50,               # NMS IoU threshold
             tracker="bytetrack.yaml",
             verbose=False,
