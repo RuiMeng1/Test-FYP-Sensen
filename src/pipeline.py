@@ -223,7 +223,10 @@ class CameraWorker:
                     bw = x2 - x1
                     bh = y2 - y1
                     # Quality gate: clean bounding box with sufficient resolution
-                    if bw >= 28 and bh >= 60 and d.confidence >= 0.40:
+                    # Preserve the local/global mapping during suspected
+                    # occlusion, but skip embeddings AND thumbnail candidates.
+                    # The gallery retains known IDs when passed embedding=None.
+                    if not d.partially_occluded and bw >= 28 and bh >= 60 and d.confidence >= 0.40:
                         crop = frame[max(0, y1):min(frame.shape[0], y2), max(0, x1):min(frame.shape[1], x2)]
                         if crop.size > 0:
                             crops_to_extract.append(crop)

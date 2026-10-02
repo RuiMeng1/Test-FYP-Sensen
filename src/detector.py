@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 import numpy as np
+from src.occlusion import PartialOcclusionGuard
 
 # PyTorch MPS is NOT safe for concurrent multi-threaded use.
 # All PersonDetector instances share this lock so only one camera
@@ -27,6 +28,7 @@ class Detection:
     local_id: int                      # ByteTrack local ID (per camera, resets on new video)
     confidence: float                  # YOLO detection confidence
     camera_id: int                     # Which camera this belongs to
+    partially_occluded: bool = False   # Retain track, but do not learn its appearance
 
 
 class PersonDetector:
@@ -39,6 +41,7 @@ class PersonDetector:
         from ultralytics import YOLO
         self._model = YOLO(model_name)
         self.device = device
+        self._occlusion = PartialOcclusionGuard()
         print(f"[Detector] YOLOv8 loaded on {device.upper()}")
 
     def detect(self, frame: np.ndarray, camera_id: int) -> List[Detection]:
@@ -72,6 +75,7 @@ class PersonDetector:
             results = self._model.track(**track_kwargs)
 
         detections: List[Detection] = []
+        self._occlusion.advance()
         for r in results:
             if r.boxes is None or r.boxes.id is None:
                 continue
@@ -92,18 +96,22 @@ class PersonDetector:
                 # ── Full Body Filter ──
                 # A standing person typically has an aspect ratio (height/width) between 2.0 and 3.0.
                 # If it's less than 1.5, it's likely heavily occluded (just a head/torso).
-                if box_h / box_w < 1.5:
-                    continue
-                    
-                # Ignore very small boxes far in the background (e.g., less than 15% of frame height)
-                if box_h < h * 0.15:
+                # New tracks still need a full-sized box. Established tracks
+                # may retain a partial box without updating their appearance.
+                local_id = int(box.id.item())
+                retain, occluded = self._occlusion.check(
+                    local_id, box_w, box_h,
+                    full_body=box_h / box_w >= 1.5 and box_h >= h * 0.15,
+                )
+                if not retain:
                     continue
 
                 detections.append(Detection(
                     bbox=(x1, y1, x2, y2),
-                    local_id=int(box.id.item()),
+                    local_id=local_id,
                     confidence=float(box.conf.item()),
                     camera_id=camera_id,
+                    partially_occluded=occluded,
                 ))
 
         return detections
