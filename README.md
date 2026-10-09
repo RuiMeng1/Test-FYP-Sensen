@@ -1,6 +1,6 @@
 # Multi-Camera Person Tracking Pipeline
 
-Real-time multi-camera person detection and re-identification using **YOLOv8** (bounding boxes + local tracking) and **PersonViT** (cross-camera global identity matching).
+Real-time multi-camera person detection and re-identification using **YOLOv8** (bounding boxes + local tracking) and **PersonViT-ReID** (cross-camera global identity matching with DINOv2 fallback).
 
 ---
 
@@ -24,18 +24,21 @@ py -3.10 -m venv .venv
 pip install -r requirements.txt
 ```
 
-> **Note:** First run will auto-download YOLOv8 weights (~6 MB) and the PersonViT MSMT17 model.
+> **Note:** 
+> - **YOLOv8** weights (`yolov8n.pt`, ~6 MB) auto-download on the first run.
+> - **PersonViT-ReID** weights are pre-bundled in `models/personvit_reid/` (falls back to DINOv2 ViT-Small via `timm` if missing).
+> - *(Optional)* For the AI Assistant features, copy `.env.example` to `.env` and set your `OPENAI_API_KEY`.
 
 ### 2. Configure Settings (UI)
 
-Instead of editing code, you can use the built-in web UI to configure thresholds, especially for cameras with extreme angle differences (like portrait vs landscape).
+Instead of editing code, you can use the built-in configuration UI to adjust similarity thresholds, especially for cameras with extreme angle differences (such as portrait vs landscape).
 
 ```bash
 python scripts/configure.py
 ```
-This will open your browser at `http://localhost:7700`.
-- Adjust **Per-Camera-Pair Thresholds** (lower thresholds like 0.55 are recommended for cameras with very different angles to avoid false negatives).
-- Click **Save Settings**. (Settings are saved to `config/pipeline_settings.json`).
+This opens your browser at `http://localhost:7700`.
+- Adjust **Per-Camera-Pair Thresholds** (lower thresholds like `0.55` are recommended for cameras with very different viewpoints to prevent false negatives).
+- Click **Save Settings** (saved to `config/pipeline_settings.json`).
 - Stop the server with `Ctrl+C` in your terminal.
 
 ### 3. Run Pipeline
@@ -46,8 +49,32 @@ python -m src.main
 ```
 
 The pipeline runs in **two phases**:
-1. **Processing** — All videos are processed headlessly at maximum speed. Annotated output videos and a `tracking_log.json` are saved to `output/`.
-2. **Review** — An interactive tkinter dashboard opens automatically for post-processing review.
+1. **Processing** — All camera feeds are processed headlessly across worker threads at maximum speed. Annotated output videos and `tracking_log.json` are saved to `output/`.
+2. **Review** — An interactive review dashboard opens automatically for post-processing review.
+
+---
+
+## Review Dashboards
+
+Two review interfaces are available:
+
+### 1. Web Review Dashboard & AI Assistant (Recommended)
+```bash
+python scripts/run_web_ui.py
+```
+Opens in your browser at `http://localhost:5001`:
+- **Synchronized Video Playback** with seek slider and camera switching.
+- **Natural Language AI Queries** (e.g. *"Who entered the store after 16:08?"*, *"Find the person wearing a red jacket"*).
+- **Automated Clothing / Attribute Descriptions** powered by OpenAI Vision.
+- **Action Event Timeline** showing detected movements and spatiotemporal intervals.
+
+### 2. Desktop Review UI (Tkinter)
+```bash
+python -m src.main --review-only
+```
+- Expandable per-person timelines and crop thumbnails.
+- Interactive **ID Merging** to correct split tracks post-run.
+- Auto-tracking mode that follows a selected person across camera feeds.
 
 ---
 
@@ -60,32 +87,17 @@ python -m src.main --videos data/cam1.mp4 data/cam2.mp4
 # Skip the review UI (headless processing only)
 python -m src.main --no-preview
 
-# Skip processing and open the review dashboard with existing output
+# Skip processing and launch the desktop review UI directly
 python -m src.main --review-only
 
 # Performance tweak: extract Re-ID features less often (e.g., every 10 frames)
 python -m src.main --reid-interval 10
 
-# Force a specific device (auto-detects by default)
+# Force a specific compute device (auto-detects by default)
 python -m src.main --device cpu
 python -m src.main --device mps    # Apple Silicon GPU
 python -m src.main --device cuda   # NVIDIA GPU (when available)
-
-# Override the web dashboard port (default: 5001)
-python -m src.main --port 5001
 ```
-
----
-
-## Review Dashboard
-
-After processing completes, the **Review UI** opens automatically (or via `--review-only`). It loads the annotated output videos and `tracking_log.json` and provides:
-
-- **Video playback** — play/pause, frame stepping, and a seek slider.
-- **Person logger** — expandable per-person appearance timelines.
-- **Auto-tracking mode** — click any Person ID to full-screen their current camera and automatically follow them across cameras as they move.
-- **Auto-detection wait** — if a person is not currently live, the UI waits for them to appear and then auto full-screens.
-- **Manual camera switching** — Grid View, Cam 1, Cam 2, Cam 3 buttons + double-click to full-screen.
 
 ---
 
@@ -102,9 +114,9 @@ output/
 ```
 
 Each video shows:
-- **Bounding boxes** around every detected person.
-- **Global ID** (e.g. `ID:003`) — stable and consistent across all cameras.
-- **HUD overlay** — camera number, frame progress, FPS, person count.
+- **Bounding boxes** around every detected person with confidence score.
+- **Global ID** (e.g. `ID:003`) — consistent across all cameras.
+- **HUD overlay** — camera ID, frame progress, FPS, person count.
 
 ---
 
@@ -119,9 +131,11 @@ data/
                   [YOLOv8-nano]         person detection + ByteTrack
                   bounding boxes + local IDs
                          │
+                  [Occlusion Filter]    suppresses updates for partially occluded crops
+                         │
                   [Person crops]
                          │
-                  [PersonViT (MSMT17)]  feature extraction (384-dim)
+                  [PersonViT (MSMT17)]  feature extraction (384-dim normalized)
                          │
                   [GlobalGallery]       cosine similarity cross-camera matching
                                         (supports per-pair thresholds & exemplar banks)
@@ -130,8 +144,10 @@ data/
          [TrackingLog]                   [output/*.mp4]
          per-person timelines            annotated video files
                │
-         [Review UI]
-         interactive tkinter dashboard
+      ┌────────┴────────────────────────┐
+      ▼                                 ▼
+[Web Review UI + AI Assistant]    [Tkinter Desktop UI]
+(scripts/run_web_ui.py)           (python -m src.main --review-only)
 ```
 
 ---
@@ -140,30 +156,42 @@ data/
 
 ```text
 Test-FYP-Sensen/
+├── .env.example                # Example environment variables (OPENAI_API_KEY)
 ├── .venv/                      # Python virtual environment
 ├── config/
 │   └── pipeline_settings.json  # Saved from scripts/configure.py
 ├── data/                       # Input video files (*.mp4)
-├── models/                     # Downloaded model weights (PersonViT)
-├── output/                     # Annotated output videos, HTML reports & tracking log
+├── docs/
+│   └── partial-occlusion.md    # Documentation for occlusion handling logic
+├── models/
+│   └── personvit_reid/         # Bundled PersonViT-ReID model weights & config
+├── output/                     # Annotated output videos, HTML reports & tracking logs
 ├── scripts/
-│   └── configure.py            # Local web server for configuration UI
+│   ├── configure.py            # Local web server for threshold configuration UI
+│   ├── download_weights.py     # TransReID weights downloader utility
+│   ├── draw_zones.py           # Interactive zone drawing utility
+│   ├── generate_test_videos.py # Synthetic video generation tool
+│   ├── playback.py             # Multi-video synced playback tool
+│   └── run_web_ui.py           # Web review dashboard & OpenAI assistant server
 ├── src/
-│   ├── config.py               # Hardcoded defaults & settings loader
-│   ├── detector.py             # YOLOv8 + ByteTrack person detector
-│   ├── dispatcher.py           # Syncs frames across multiple cameras
+│   ├── action_analysis.py      # Offline action & movement interval extraction
+│   ├── action_events.py        # Spatiotemporal event data structures
+│   ├── action_labels.py        # Action label definitions and formatters
+│   ├── ai_assistant.py         # OpenAI vision & LLM tracking assistant
+│   ├── config.py               # Settings, defaults & runtime loader
+│   ├── detector.py             # YOLOv8 + ByteTrack detector
+│   ├── dispatcher.py           # Syncs detections across cameras
 │   ├── gallery.py              # Cross-camera global ID gallery & exemplar banks
-│   ├── main.py                 # Entry point: two-phase process → review workflow
+│   ├── main.py                 # Pipeline entry point
+│   ├── occlusion.py            # Partial occlusion detection & size history tracking
 │   ├── pipeline.py             # Per-camera worker thread logic
-│   ├── reid_model.py           # PersonViT feature extractor
-│   ├── review_ui.py            # Post-processing review dashboard (tkinter)
-│   ├── tk_ui.py                # Native tkinter live dashboard (zero-overhead)
-│   ├── tracking_log.py         # Thread-safe per-person appearance timeline recorder
-│   ├── video_loader.py         # Video discovery & CLI argument parsing
-│   ├── web_server.py           # Flask web UI for live tracking dashboard (MJPEG)
-│   └── templates/
-│       └── index.html          # Web dashboard HTML template
-├── pyrightconfig.json          # IDE configuration for type-checking
+│   ├── reid_model.py           # PersonViT feature extractor with DINOv2 fallback
+│   ├── review_ui.py            # Post-processing desktop review UI (Tkinter)
+│   ├── tk_ui.py                # Native Tkinter live preview helper
+│   ├── tracking_log.py         # Thread-safe timeline recorder
+│   ├── video_loader.py         # Video discovery & CLI argument parser
+│   ├── web_review.py           # Web review API backend
+│   └── templates/              # HTML templates for web UI
 ├── requirements.txt            # Python dependencies
-└── README.md                   # You are here
+└── README.md                   # Project documentation
 ```

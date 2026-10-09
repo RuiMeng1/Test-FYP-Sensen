@@ -180,6 +180,7 @@ def main() -> None:
     if show_preview:
         print("[Main] Opening review dashboard …\n")
         try:
+            tracking_data = TrackingLog.load(str(log_path))
             from src.review_ui import ReviewUI
             ui = ReviewUI(tracking_data=tracking_data, output_dir=str(OUTPUT_DIR))
             ui.run()
