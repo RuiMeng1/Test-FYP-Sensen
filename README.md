@@ -168,7 +168,6 @@ Test-FYP-Sensen/
 ├── output/                     # Annotated output videos, HTML reports & tracking logs
 ├── scripts/
 │   ├── configure.py            # Local web server for threshold configuration UI
-│   ├── download_weights.py     # TransReID weights downloader utility
 │   ├── draw_zones.py           # Interactive zone drawing utility
 │   ├── generate_test_videos.py # Synthetic video generation tool
 │   ├── playback.py             # Multi-video synced playback tool

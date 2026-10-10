@@ -23,7 +23,7 @@ from typing import List
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Multi-Camera Person Tracking  (YOLOv8 + TransReID)",
+        description="Multi-Camera Person Tracking  (YOLOv8 + PersonViT-ReID)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

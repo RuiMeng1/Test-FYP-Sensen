@@ -404,7 +404,7 @@ HTML = r"""<!DOCTYPE html>
   <div class="logo">⚙</div>
   <div>
     <h1>Pipeline Configuration</h1>
-    <p>Multi-Camera Person Tracking · YOLOv8 + TransReID</p>
+    <p>Multi-Camera Person Tracking · YOLOv8 + PersonViT-ReID</p>
   </div>
   <div class="header-actions">
     <button class="btn btn-ghost" onclick="resetToDefaults()">↺ Reset</button>

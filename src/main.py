@@ -59,7 +59,7 @@ def main() -> None:
         return
 
     # ── Phase 1: Pre-process (headless) ───────────────────────────────────────
-    from src.config import DEVICE, REID_DEVICE, REID_EVERY_N_FRAMES, TRANSREID_WEIGHTS
+    from src.config import DEVICE, REID_DEVICE, REID_EVERY_N_FRAMES
     from src.config import REID_THRESHOLD, GALLERY_TTL_FRAMES, YOLO_MODEL_NAME
     from src.config import REID_THRESHOLD_MATRIX
     from src.dispatcher import DetectionDispatcher
@@ -77,7 +77,7 @@ def main() -> None:
     # ── Banner ────────────────────────────────────────────────────────────────
     print()
     print("╔══════════════════════════════════════════════════════════╗")
-    print("║       Multi-Camera Person Tracking  (YOLOv8 + TransReID) ║")
+    print("║     Multi-Camera Person Tracking (YOLOv8 + PersonViT)    ║")
     print("╚══════════════════════════════════════════════════════════╝")
     print(f"  Detect device : {device.upper()}")
     print(f"  ReID device   : {reid_dev.upper()}  "
@@ -98,8 +98,8 @@ def main() -> None:
         model_name=YOLO_MODEL_NAME,
     )
 
-    print("[Setup] Loading TransReID encoder …")
-    reid_model = TransReIDEncoder(weights_path=TRANSREID_WEIGHTS, device=reid_dev)
+    print("[Setup] Loading PersonViT Re-ID encoder …")
+    reid_model = TransReIDEncoder(device=reid_dev)
 
     print("[Setup] Initialising global gallery …")
     camera_name_map = {idx + 1: vp.stem for idx, vp in enumerate(video_paths)}

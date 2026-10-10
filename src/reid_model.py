@@ -50,9 +50,9 @@ _DINO_TRANSFORM = T.Compose([
 ])
 
 
-class TransReIDEncoder:
+class PersonViTEncoder:
     """
-    Person Re-ID feature extractor.  Thread-safe.
+    Person Re-ID feature extractor. Thread-safe.
 
     Uses PersonViT (proper ReID model trained on MSMT17) by default.
     Falls back to DINOv2-ViT-Small if the model files are missing.
@@ -61,6 +61,7 @@ class TransReIDEncoder:
     PERSONVIT_DIR = Path(__file__).parent.parent / "models" / "personvit_reid"
 
     def __init__(self, weights_path: Optional[Path] = None, device: str = "cpu"):
+        # weights_path retained for backwards compatibility (unused; uses PERSONVIT_DIR)
         self.device  = device
         self._lock   = threading.Lock()
         self._transform = _REID_TRANSFORM
@@ -88,7 +89,7 @@ class TransReIDEncoder:
         )
         model = model.to(self.device)
         feat_dim = cfg.embedding_dim   # 384
-        print(f"[ReID] PersonViT-ReID ready  (feat_dim={feat_dim}, MSMT17-trained ✓)")
+        print(f"[ReID] PersonViT-ReID ready  (feat_dim={feat_dim}, MSMT17-trained)")
         return model, feat_dim
 
     def _load_dinov2(self):
@@ -153,3 +154,8 @@ class TransReIDEncoder:
                 tensors.append(self._transform(crop_rgb))
         batch = torch.stack(tensors)
         return self._forward(batch).astype(np.float32)
+
+
+# Backwards compatibility alias
+TransReIDEncoder = PersonViTEncoder
+

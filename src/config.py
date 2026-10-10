@@ -42,15 +42,12 @@ MODELS_DIR  = BASE_DIR / "models"
 
 # ── Model Paths ──────────────────────────────────────────────────────────────
 YOLO_MODEL_NAME     = "yolov8n.pt"          # auto-downloaded by ultralytics
-TRANSREID_WEIGHTS   = MODELS_DIR / "transreid_vitbase_msmt17.pth"
+PERSONVIT_MODEL_DIR = MODELS_DIR / "personvit_reid"
 
 # ── Re-ID Settings ───────────────────────────────────────────────────────────
 # Cosine similarity threshold for cross-camera "same person" match.
-# DINOv2 (current fallback): 0.65  — DINOv2 has higher baseline similarity
-#   between any two person crops than a ReID-trained model, so 0.65 is tight
-#   enough to avoid false cross-camera merges.
-# TransReID pretrained weights: 0.75  — features are more discriminative;
-#   you can raise the threshold once weights are downloaded.
+# PersonViT-ReID (bundled): normalized 384-dim embeddings from MSMT17.
+# DINOv2 (fallback): 0.65 threshold avoids false cross-camera merges.
 # Lower = more likely to link same person; Higher = fewer false links.
 REID_THRESHOLD      = 0.65
 
@@ -146,7 +143,7 @@ def _select_device() -> str:
 # Device used for YOLOv8 detection (supports MPS/CUDA/CPU)
 DEVICE = _select_device()
 
-# Device used for TransReID Re-ID model.
+# Device used for PersonViT Re-ID model.
 # IMPORTANT: PyTorch MPS does NOT support multi-threaded use — it can only run
 # on the main thread. Since Re-ID runs inside camera worker threads, we must
 # use CPU (or CUDA if available). This is a known macOS/MPS limitation.

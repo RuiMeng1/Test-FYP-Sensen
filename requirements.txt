@@ -1,11 +1,11 @@
 # Multi-Camera Person Tracking Pipeline
-# YOLOv8 + TransReID (ViT-Base)
+# YOLOv8 + PersonViT-ReID
 
 # Core deep learning
 torch>=2.0.0
 torchvision>=0.15.0
 
-# ViT backbone for TransReID
+# ViT backbone & Re-ID models (DINOv2 fallback)
 timm>=0.9.0
 
 # HuggingFace Transformers (PersonViT-ReID AutoModel loading)
@@ -13,21 +13,21 @@ transformers>=4.35.0
 
 # Person detection + tracking (YOLOv8 + ByteTrack)
 ultralytics>=8.0.0
+lap>=0.4.0
 
-# Video I/O
+# Image & Video I/O (including Web Review proxy generation)
+pillow>=9.5.0
 opencv-python>=4.8.0
+av>=14.0.0
 
-# Numerics
+# Numerics & Linear Assignment
 numpy>=1.24.0
 scipy>=1.11.0
-
-# Download TransReID weights from Google Drive
-gdown>=4.7.1
 
 # Progress bars
 tqdm>=4.65.0
 
-# Web UI
+# Web UI & API backend
 flask>=3.0.0
 
 # AI Intelligence & Vision
