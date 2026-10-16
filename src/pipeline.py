@@ -173,6 +173,14 @@ class CameraWorker:
             )
 
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        from src.occlusion_logger import OcclusionLogger
+        try:
+            occlusion_logger = OcclusionLogger(
+                OUTPUT_DIR / 'occlusion_logs', self.camera_id, self.video_path, src_fps)
+            print(f'[Cam{self.camera_id}] Occlusion diagnostics: {occlusion_logger.path}')
+        except OSError as exc:
+            print(f'[Cam{self.camera_id}] Occlusion logging unavailable: {exc}')
+            occlusion_logger = None
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(str(self.output_path), fourcc, src_fps, (width, height))
 
@@ -294,6 +302,13 @@ class CameraWorker:
                 self.gallery.cleanup(self.frame_idx)
 
             # ── Annotate ─────────────────────────────────────────────────────
+            # Diagnostics are isolated from identity matching and appearance updates.
+            if occlusion_logger is not None:
+                try:
+                    occlusion_logger.update(self.frame_idx, detections, self._id_cache)
+                except OSError as exc:
+                    print(f'[Cam{self.camera_id}] Occlusion logging disabled: {exc}')
+                    occlusion_logger = None
             annotated = self._draw(frame, detections)
 
             # ── Update active-person state ─────────────────────────────────────
@@ -344,6 +359,11 @@ class CameraWorker:
 
         cap.release()
         writer.release()
+        if occlusion_logger is not None:
+            try:
+                occlusion_logger.finish(self.frame_idx)
+            except OSError as exc:
+                print(f'[Cam{self.camera_id}] Could not finalize occlusion log: {exc}')
         self.is_done = True
         print(
             f"[Cam{self.camera_id}] ✓  Done — {self.fps_stat:.1f} fps avg  →  {self.output_path}"
