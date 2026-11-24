@@ -196,6 +196,7 @@ class GlobalGallery:
         ttl_frames: int = 50000,
         threshold_matrix: Optional[Dict] = None,
         camera_name_map: Optional[Dict[int, str]] = None,
+        new_id_camera_ids: Optional[Set[int]] = None,
     ):
         """
         Args:
@@ -207,11 +208,13 @@ class GlobalGallery:
                               (e.g. 0.55) reduces false negatives from viewpoint drift.
             camera_name_map:  Maps camera_id (int) -> video stem (str) so the gallery
                               can look up the per-pair threshold at match time.
+            new_id_camera_ids: Cameras allowed to register a new global ID. None allows all.
         """
         self.reid_threshold    = reid_threshold
         self.ttl_frames        = ttl_frames
         self._threshold_matrix = threshold_matrix or {}
         self._camera_name_map  = camera_name_map  or {}  # {camera_id: video_stem}
+        self.new_id_camera_ids = None if new_id_camera_ids is None else frozenset(new_id_camera_ids)
 
         self._lock = threading.RLock()
         self._entries: Dict[int, GalleryEntry] = {}
@@ -367,6 +370,9 @@ class GlobalGallery:
                 assigned_locals.add(local_id)
 
             # ── Phase 3: Register any remaining unmapped tracks as new persons ─
+            if self.new_id_camera_ids is not None and camera_id not in self.new_id_camera_ids:
+                return results
+
             for local_id, emb in unmapped_detections:
                 if local_id in results:
                     continue
@@ -399,10 +405,10 @@ class GlobalGallery:
         camera_id: int,
         local_id: int,
         frame_idx: int,
-    ) -> int:
+    ) -> Optional[int]:
         """Compatibility wrapper for single track query."""
         res = self.match_batch(camera_id, frame_idx, [(local_id, embedding)])
-        return res.get(local_id, self._next_id)
+        return res.get(local_id)
 
     # ── Housekeeping ─────────────────────────────────────────────────────────
 

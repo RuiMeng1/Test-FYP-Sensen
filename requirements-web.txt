@@ -1,2 +1,3 @@
 # In addition to the existing project requirements.
 av>=18.1.0
+markdown-it-py>=3.0.0

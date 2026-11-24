@@ -123,6 +123,13 @@ nav,
 .headerActions {
   margin-left: auto;
 }
+.cameraWorkspaceTools {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 10px;
+  flex-wrap: wrap;
+}
 #notice {
   padding: 8px 28px;
   color: var(--muted);
@@ -201,6 +208,164 @@ h2 {
 }
 .single .viewport {
   max-height: 65vh;
+}
+.officeMap {
+  min-width: 0;
+  margin-top: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--panel);
+}
+.officeMapHead, .officePlayback, .officeHistoryControls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+}
+.officeMapHead h2, .officeMapHead p { margin: 0; }
+.officeMapHead label { white-space: nowrap; }
+.officeScene {
+  position: relative;
+  border-block: 1px solid var(--line);
+  background: radial-gradient(ellipse at 50% 42%, #172c3f, #0a121e 78%);
+}
+#officeScene {
+  display: block;
+  width: 100%;
+  height: clamp(275px, 35vw, 450px);
+}
+#officeMarkers {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.officePersonMarker {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 2px solid #f1f7ff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px #0b1420, 0 2px 6px #000a;
+  pointer-events: auto;
+}
+.officePersonMarker:hover, .officePersonMarker:focus-visible { z-index: 1; }
+.officePersonMarker:is(:hover, :focus-visible)::after {
+  content: attr(data-label);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 7px);
+  transform: translateX(-50%);
+  padding: 3px 6px;
+  border: 1px solid #527088;
+  border-radius: 5px;
+  background: #101d2b;
+  color: #f1f7ff;
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.officeOverviewHelp { padding: 6px 12px 8px; }
+.officeViewControls {
+  position: absolute;
+  inset: auto 10px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.officeViewControls label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 8px;
+  background: #101d2bd9;
+  padding: 6px 8px;
+}
+.officeViewControls input { max-width: 90px; }
+.officeViewControls button, .officeHistoryControls button { padding: 5px 9px; }
+.officeViewControls button[aria-pressed="true"] { border-color: var(--accent); }
+.officeLocation { padding: 10px 12px 0; color: #b0e8dc; min-height: 32px; }
+.officePlayback { padding-bottom: 2px; }
+.officeTime { flex: 1; min-width: 0; }
+#officeCoverage { display: block; width: 100%; height: 5px; border-radius: 5px; }
+#officeSeek { display: block; width: 100%; padding: 0; margin: 6px 0 2px; accent-color: var(--accent); }
+#officeClock { white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums; }
+.officeLegend { display: flex; gap: 12px; flex-wrap: wrap; padding: 2px 12px 12px; }
+.officeLegend span::before {
+  display: inline-block;
+  content: "";
+  width: 10px;
+  height: 4px;
+  vertical-align: middle;
+  border-radius: 3px;
+  margin-right: 6px;
+  background: #62dac5;
+}
+.officeLegend span + span::before { background: #34475e; }
+.officeLegend #officePinLegend::before { background: #8fbafa; }
+#officeHistory { border-top: 1px solid var(--line); }
+#officeHistory summary { cursor: pointer; padding: 10px 12px; }
+#officeHistoryCount { color: var(--muted); }
+.officeHistoryControls { flex-wrap: wrap; padding-block: 3px; }
+#officeSightings { max-height: 230px; overflow: auto; padding: 0 12px 0 38px; margin: 7px 0 12px; }
+#officeSightings li { margin: 4px 0; }
+#officeSightings button { width: 100%; text-align: left; padding: 5px 9px; }
+.officeCameraEditor {
+  width: min(960px, calc(100% - 26px));
+  max-width: none;
+  padding: 18px;
+}
+.officeEditorHead, .officeEditorPlanBar, .officeEditorFooter {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.officeEditorHead h2, .officeEditorHead p { margin: 0; }
+.officeEditorGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(230px, 1fr);
+  align-items: start;
+  gap: 16px;
+  margin-top: 14px;
+}
+.officeEditorPlanBar { margin-bottom: 8px; }
+#officeEditorPlan {
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #0b1420;
+  width: 100%;
+  height: clamp(245px, 51vh, 440px);
+  touch-action: none;
+  cursor: crosshair;
+}
+#officeEditorPlan:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.officeEditorControls { display: grid; gap: 10px; }
+.officeEditorControls select, #officeEditorHeading { display: block; width: 100%; margin-top: 4px; }
+.officeEditorControls p, .officeEditorFooter p { margin: 0; }
+.officeEditorPreview {
+  aspect-ratio: 16 / 9;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #070d15;
+}
+.officeEditorPreview video { display: block; width: 100%; height: 100%; object-fit: contain; }
+#officeEditorDegrees { color: var(--muted); margin-left: 4px; }
+#officeEditorStatus { min-height: 1.5em; color: #bce5e0; }
+.officeEditorFooter { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; }
+@media (max-width: 720px) {
+  .officeEditorGrid { grid-template-columns: 1fr; }
+}
+@media (min-width: 1380px) {
+  .withOfficeMap { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 14px; align-items: start; }
 }
 .viewport video {
   width: 100%;
@@ -332,17 +497,35 @@ summary {
   margin-bottom: 12px;
   background: #1a2637;
   border-radius: 10px;
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 .message.user {
   background: #15362f;
 }
-.message strong {
+.messageAuthor {
   display: block;
   color: var(--accent);
   margin-bottom: 5px;
 }
+.messageContent { white-space: pre-wrap; }
+.messageContent.formatted { white-space: normal; }
+.messageContent > :first-child { margin-top: 0; }
+.messageContent > :last-child { margin-bottom: 0; }
+.messageContent h1, .messageContent h2, .messageContent h3,
+.messageContent h4, .messageContent h5, .messageContent h6 {
+  font-size: 1.06em;
+  margin: .9em 0 .35em;
+}
+.messageContent ul, .messageContent ol { padding-left: 1.45em; }
+.messageContent li p { margin: .3em 0; }
+.messageContent blockquote { border-left: 2px solid var(--line); padding-left: 10px; margin-left: 0; }
+.messageContent pre { overflow-x: auto; padding: 8px; border-radius: 6px; background: #0d1522; }
+.messageContent code { background: #0d1522; border-radius: 3px; padding: 1px 3px; }
+.messageContent pre code { padding: 0; }
+.messageContent a { color: #9be7d8; }
+.messageContent table { display: block; overflow-x: auto; border-collapse: collapse; }
+.messageContent th, .messageContent td { padding: 5px 7px; border: 1px solid var(--line); text-align: left; }
+.message > .toolbar { margin-top: 10px; }
 .evidence {
   display: flex;
   gap: 6px;

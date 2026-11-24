@@ -30,12 +30,62 @@
           </div>
           <span id="summary" class="pill"></span>
         </div>
-        <div id="cameraButtons" class="toolbar"></div>
+        <div class="cameraWorkspaceTools">
+          <div id="cameraButtons" class="toolbar"></div>
+          <div class="toolbar">
+            <button id="showEveryone" type="button" aria-controls="officeMap" aria-pressed="false" disabled>Show everyone</button>
+            <button id="editOfficeCameras" type="button" disabled>Edit cameras</button>
+          </div>
+        </div>
         <div id="followBar" hidden>
           <span id="followText"></span
-          ><button id="stopFollow">Stop following ×</button>
+          ><div class="toolbar">
+            <button id="officeMapToggle" aria-controls="officeMap" aria-expanded="false">Open 3D map</button>
+            <button id="stopFollow">Stop following ×</button>
+          </div>
         </div>
-        <div id="cameras" class="cameraGrid"></div>
+        <div id="reviewStage">
+          <section id="officeMap" class="officeMap" aria-labelledby="officeMapTitle" hidden>
+            <div class="officeMapHead">
+              <div>
+                <h2 id="officeMapTitle">3D office map</h2>
+                <p id="officeMapNote" class="subtle"></p>
+              </div>
+              <label>Floor <select id="officeFloor"></select></label>
+            </div>
+            <div class="officeScene">
+              <canvas id="officeScene" role="img" aria-label="3D view of camera zones and the followed person's route"></canvas>
+              <div id="officeMarkers" role="group" aria-label="Visible people" hidden></div>
+              <div class="officeViewControls">
+                <label>Rotate <input id="officeRotate" type="range" min="-180" max="180" value="-34" /></label>
+                <button id="officeTop" type="button" aria-pressed="false">Top view</button>
+              </div>
+            </div>
+            <div id="officeLocation" class="officeLocation" role="status"></div>
+            <div class="officePlayback">
+              <button id="officePlay" class="primary" type="button">Play</button>
+              <div class="officeTime">
+                <canvas id="officeCoverage" aria-hidden="true"></canvas>
+                <input id="officeSeek" type="range" min="0" max="1" step="0.01" value="0" aria-label="Office map playback time" />
+              </div>
+              <output id="officeClock"></output>
+            </div>
+            <div id="officeOverviewHelp" class="officeOverviewHelp subtle" hidden>Click a colored marker to follow that person. Positions are approximate for cameras mapped only to rooms.</div>
+            <div class="officeLegend subtle"><span id="officeSightingsLegend">Recorded sightings</span><span id="officeGapsLegend">Gaps have no observed location</span><span id="officePinLegend" hidden>Camera pins</span></div>
+            <details id="officeHistory">
+              <summary>Movement history <span id="officeHistoryCount"></span></summary>
+              <div class="officeHistoryControls">
+                <label><input type="checkbox" id="officeFullRoute" /> Show full recorded route</label>
+                <div class="toolbar">
+                  <button id="officeEarlier" type="button">Previous</button>
+                  <button id="officeLater" type="button">Next</button>
+                </div>
+              </div>
+              <ol id="officeSightings"></ol>
+            </details>
+          </section>
+          <div id="cameras" class="cameraGrid"></div>
+        </div>
         <div class="transport">
           <div class="transportButtons">
             <button id="previous" title="Previous frame">|◀</button
@@ -87,8 +137,7 @@
             <h2>Ask your footage</h2>
             <button id="clearChat">Clear chat</button>
             <p class="subtle">
-              Answers from recorded sightings, appearance profiles and suggested
-              actions.
+              Uses the saved office map, your playback position, and recorded sightings.
             </p>
           </div>
           <div id="messages" aria-live="polite"></div>
@@ -96,6 +145,7 @@
             <textarea
               id="prompt"
               rows="2"
+              maxlength="10000"
               placeholder="Where was Person 2?"
               aria-label="Question"
             ></textarea
@@ -146,15 +196,62 @@
         <select id="mergeTarget"></select
       ></label>
       <p class="subtle">
-        Sightings and detections will be reassigned and saved to the tracking
-        log. Action analysis must be rerun afterward. A backup of the log is
-        kept.
+        The remaining IDs will be renumbered to close the gap. A backup of the tracking log is kept.
       </p>
+      <p id="mergeError" role="alert" hidden></p>
       <div class="toolbar">
         <button id="cancelMerge">Cancel</button
         ><button id="confirmMerge" class="danger">Confirm merge</button>
       </div>
     </dialog>
+    <dialog id="deleteIdDialog" aria-labelledby="deleteIdTitle">
+      <h2 id="deleteIdTitle">Delete false ID</h2>
+      <p id="deleteIdDescription"></p>
+      <p class="subtle">The remaining IDs will be renumbered to close the gap. A backup of the tracking log is kept.</p>
+      <p id="deleteIdError" role="alert" hidden></p>
+      <div class="toolbar">
+        <button id="cancelDeleteId" autofocus>Cancel</button>
+        <button id="confirmDeleteId" class="danger">Delete ID</button>
+      </div>
+    </dialog>
+    <dialog id="officeCameraEditor" class="officeCameraEditor" aria-labelledby="officeCameraEditorTitle">
+      <div class="officeEditorHead">
+        <div>
+          <h2 id="officeCameraEditorTitle">Edit cameras</h2>
+          <p id="officeEditorPlanName" class="subtle"></p>
+        </div>
+        <button id="officeEditorClose" type="button" aria-label="Close camera editor">×</button>
+      </div>
+      <div class="officeEditorGrid">
+        <div>
+          <div class="officeEditorPlanBar">
+            <label>Floor <select id="officeEditorFloor"></select></label>
+            <span id="officeEditorPinCount" class="subtle"></span>
+          </div>
+          <canvas id="officeEditorPlan" tabindex="0" aria-label="Floor plan for placing cameras" aria-describedby="officeEditorInstructions"></canvas>
+          <p id="officeEditorInstructions" class="subtle">Click the plan to place the selected camera or drag a pin to move it. Use arrow keys to nudge the pin.</p>
+        </div>
+        <div class="officeEditorControls">
+          <label>Camera <select id="officeEditorCamera"></select></label>
+          <div class="officeEditorPreview">
+            <video id="officeEditorVideo" muted controls playsinline preload="metadata" aria-label="Selected camera footage"></video>
+            <p id="officeEditorNoVideo" class="subtle" hidden>Footage is unavailable for this camera.</p>
+          </div>
+          <label>Coverage area <select id="officeEditorZone"></select></label>
+          <p class="subtle">Choose where this camera sees people. This can differ from where the camera is mounted.</p>
+          <label>Facing direction <output id="officeEditorDegrees"></output>
+            <input id="officeEditorHeading" type="range" min="0" max="359" step="1" value="0" />
+          </label>
+          <button id="officeEditorRemove" type="button">Remove pin</button>
+        </div>
+      </div>
+      <div class="officeEditorFooter">
+        <p id="officeEditorStatus" role="status"></p>
+        <button id="officeEditorSave" class="primary" type="button">Save camera layout</button>
+      </div>
+    </dialog>
+    <script src="/assets/office-map.js" defer></script>
+    <script src="/assets/office-camera-editor.js" defer></script>
     <script src="/assets/review.js" defer></script>
   </body>
 </html>

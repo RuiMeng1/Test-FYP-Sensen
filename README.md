@@ -36,17 +36,35 @@ Instead of editing code, you can use the built-in configuration UI to adjust sim
 ```bash
 python scripts/configure.py
 ```
-This opens your browser at `http://localhost:7700`.
-- Adjust **Per-Camera-Pair Thresholds** (lower thresholds like `0.55` are recommended for cameras with very different viewpoints to prevent false negatives).
-- Click **Save Settings** (saved to `config/pipeline_settings.json`).
-- Stop the server with `Ctrl+C` in your terminal.
+This opens your browser at `http://localhost:7700`. In **New Person IDs**, choose
+**Selected cameras only** and pick cameras by their previews and filenames. Choose
+**All cameras** for the usual ID creation behavior. Click **Save Settings**. The
+same page also controls the per-camera-pair matching thresholds. Use the same
+`--data-dir` for configuration and tracking when the videos are outside `data/`.
 
 ### 3. Run Pipeline
 
 ```bash
-# Default: process all videos in data/, then open the interactive review dashboard
-python -m src.main
+# Use the choice saved in the configuration UI
+python -m src.main --use-saved-id-cameras
+
+# Or choose the entrance and back stairs by filename stem
+python -m src.main --new-id-cameras 1-entrance-stairs_000 8-back-stairs_000
+
+# Or allow every camera to create new IDs
+python -m src.main --all-id-cameras
 ```
+
+Each processing run requires one of these choices. `python -m src.main --list-cameras`
+shows filenames and their run numbers. You can pass those numbers, filenames, or
+filename stems to `--new-id-cameras`. Run numbers follow the current input order.
+The UI saves by filename stem, so its selection works across input reorderings.
+If a saved camera is missing from a run, choose the cameras for that run explicitly.
+
+All cameras still match existing IDs. In selected-camera mode, unmatched people
+appear as **Unknown** in footage and can gain an existing ID on a later match.
+People who were already inside or missed at an entrance may stay Unknown. Only
+matched people appear in the People Gallery and per-person activity records.
 
 The pipeline runs in **two phases**:
 1. **Processing** — Camera feeds are processed headlessly across worker threads. YOLO detection runs on two cameras concurrently by default on CPU; GPU runs stay serial by default. Annotated output videos and `tracking_log.json` are saved to `output/`.
@@ -60,13 +78,15 @@ Two review interfaces are available:
 
 ### 1. Web Review Dashboard & AI Assistant (Recommended)
 ```bash
-python scripts/run_web_ui.py
+python -m src.web_review
 ```
-Opens in your browser at `http://localhost:5001`:
+Open `http://127.0.0.1:5002` after the server starts:
 - **Synchronized Video Playback** with seek slider and camera switching.
 - **Natural Language AI Queries** (e.g. *"Who entered the store after 16:08?"*, *"Find the person wearing a red jacket"*).
 - **Automated Clothing / Attribute Descriptions** powered by OpenAI Vision.
 - **Action Event Timeline** showing detected movements and spatiotemporal intervals.
+- **3D Office Map** when following a person, with recorded sightings, camera
+  handoffs, and replay of their recorded movement. [Map setup](docs/web-review.md#3d-office-map).
 
 ### 2. Desktop Review UI (Tkinter)
 ```bash
@@ -82,25 +102,25 @@ python -m src.main --review-only
 
 ```bash
 # Manually select specific videos instead of auto-loading all in data/
-python -m src.main --videos data/cam1.mp4 data/cam2.mp4
+python -m src.main --videos data/cam1.mp4 data/cam2.mp4 --new-id-cameras cam1
 
 # Skip the review UI (headless processing only)
-python -m src.main --no-preview
+python -m src.main --use-saved-id-cameras --no-preview
 
 # Skip processing and launch the desktop review UI directly
 python -m src.main --review-only
 
 # Performance tweak: extract Re-ID features less often (e.g., every 10 frames)
-python -m src.main --reid-interval 10
+python -m src.main --all-id-cameras --reid-interval 10
 
 # Compare serial detection with the CPU default of two concurrent detections
-python -m src.main --detector-workers 1
-python -m src.main --detector-workers 2
+python -m src.main --all-id-cameras --detector-workers 1
+python -m src.main --all-id-cameras --detector-workers 2
 
 # Force a specific compute device (auto-detects by default)
-python -m src.main --device cpu
-python -m src.main --device mps    # Apple Silicon GPU
-python -m src.main --device cuda   # NVIDIA GPU (when available)
+python -m src.main --all-id-cameras --device cpu
+python -m src.main --all-id-cameras --device mps    # Apple Silicon GPU
+python -m src.main --all-id-cameras --device cuda   # NVIDIA GPU (when available)
 ```
 
 ---

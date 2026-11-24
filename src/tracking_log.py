@@ -34,7 +34,8 @@ def saved_detection_counts(detections: dict) -> Dict[int, int]:
         for boxes in frames.values():
             for box in boxes:
                 gid = int(box["gid"])
-                counts[gid] = counts.get(gid, 0) + 1
+                if gid >= 0:
+                    counts[gid] = counts.get(gid, 0) + 1
     return counts
 
 
@@ -127,6 +128,8 @@ class TrackingLog:
         total_frames: int,
         video_file: str,
         raw_video_file: str = "",
+        width: int = 0,
+        height: int = 0,
     ) -> None:
         """Register a camera's metadata."""
         with self._lock:
@@ -136,6 +139,8 @@ class TrackingLog:
                 "video_file": video_file,
                 "raw_video_file": raw_video_file,
             }
+            if width > 0 and height > 0:
+                self._cameras[cam_id].update(width=width, height=height)
             self._frame_visibility[cam_id] = {}
             self._detections[cam_id] = {}
 
@@ -145,7 +150,7 @@ class TrackingLog:
         frame_idx: int,
         detections: List[Tuple[int, List[int]]],
     ) -> None:
-        """Record per-frame bounding boxes: list of (gid, [x1, y1, x2, y2])."""
+        """Record (gid, [x1, y1, x2, y2]) boxes. A gid of -1 means Unknown."""
         with self._lock:
             if detections:
                 self._detections.setdefault(camera_id, {})[frame_idx] = [

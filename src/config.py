@@ -39,6 +39,7 @@ BASE_DIR    = Path(__file__).parent.parent
 DATA_DIR    = BASE_DIR / "data"
 OUTPUT_DIR  = BASE_DIR / "output"
 MODELS_DIR  = BASE_DIR / "models"
+PIPELINE_SETTINGS_PATH = BASE_DIR / "config" / "pipeline_settings.json"
 
 # ── Model Paths ──────────────────────────────────────────────────────────────
 YOLO_MODEL_NAME     = "yolov8n.pt"          # auto-downloaded by ultralytics
@@ -88,7 +89,7 @@ GALLERY_TTL_FRAMES  = 50000
 
 def _load_runtime_settings() -> None:
     """Load config/pipeline_settings.json and override module-level variables."""
-    settings_path = BASE_DIR / "config" / "pipeline_settings.json"
+    settings_path = PIPELINE_SETTINGS_PATH
     if not settings_path.exists():
         return  # No UI config yet — use built-in defaults
 

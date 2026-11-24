@@ -70,7 +70,7 @@ def _analyze_camera(cid, meta, data, args, model, data_dir):
         while time_s < end:
             frame_idx = min(total - 1, round(time_s * fps))
             found = detections.get(str(frame_idx), [])
-            counts = Counter(d['gid'] for d in found)
+            counts = Counter(d['gid'] for d in found if d['gid'] >= 0)
             ambiguous += sum(n > 1 for n in counts.values())
             valid = [d for d in found if d['gid'] >= 0 and counts[d['gid']] == 1
                      and d['bbox'][2] > d['bbox'][0] and d['bbox'][3] > d['bbox'][1]]

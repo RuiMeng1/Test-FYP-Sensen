@@ -105,6 +105,7 @@ class CameraWorker:
         self.dispatcher    = dispatcher
         self.reid_model    = reid_model
         self.gallery       = gallery
+        self._show_unknown = gallery.new_id_camera_ids is not None
         self.display_queue = display_queue
         self.reid_interval = reid_interval
         self.tracking_log  = tracking_log
@@ -181,6 +182,7 @@ class CameraWorker:
                 total_frames=self.total_frames,
                 video_file=self.output_path.name,
                 raw_video_file=self.video_path.name,
+                width=width, height=height,
             )
 
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -202,6 +204,7 @@ class CameraWorker:
             f"({width}×{height} @ {src_fps:.1f} fps | {self.total_frames} frames)"
         )
 
+        previous_local_ids = set()
         while not self._stop_event.is_set():
             ret, frame = cap.read()
             if not ret:
@@ -233,8 +236,13 @@ class CameraWorker:
                 detections = filtered
 
             # ── Re-ID every N frames (or immediately for newly appeared tracks) ──
-            has_unmapped = any(d.local_id not in self._id_cache for d in detections)
-            if (self.frame_idx % self.reid_interval == 0 or has_unmapped) and detections:
+            local_ids = {d.local_id for d in detections}
+            unmapped = local_ids.difference(self._id_cache)
+            # In restricted mode, persistent Unknown tracks can wait for the next
+            # scheduled matching attempt instead of triggering inference every frame.
+            immediate = unmapped - previous_local_ids if self._show_unknown else unmapped
+            previous_local_ids = local_ids
+            if detections and (self.frame_idx % self.reid_interval == 0 or immediate):
                 crops_to_extract = []
                 valid_indices = set()
 
@@ -294,6 +302,9 @@ class CameraWorker:
                                 batch_items[j] = (tid_j, None)
 
                 matched = self.gallery.match_batch(self.camera_id, self.frame_idx, batch_items)
+                if self._show_unknown:
+                    for local_id in local_ids.difference(matched):
+                        self._id_cache.pop(local_id, None)
                 self._id_cache.update(matched)
 
                 # Periodically offer crops so the gallery can retain three
@@ -339,7 +350,7 @@ class CameraWorker:
                 frame_dets = []
                 for det in detections:
                     gid = self._id_cache.get(det.local_id, -1)
-                    if gid >= 0:
+                    if gid >= 0 or self._show_unknown:
                         frame_dets.append((gid, [int(v) for v in det.bbox]))
                 self.tracking_log.record_detections(
                     self.camera_id, self.frame_idx, frame_dets
@@ -396,7 +407,10 @@ class CameraWorker:
             cv2.rectangle(out, (x1, y1), (x2, y2), color, 3)
 
             # ── Large ID label ────────────────────────────────────────────────
-            id_text   = f"ID:{gid:03d}" if gid >= 0 else f"L:{det.local_id}"
+            if gid >= 0:
+                id_text = f"ID:{gid:03d}"
+            else:
+                id_text = "Unknown" if self._show_unknown else f"L:{det.local_id}"
             id_font   = cv2.FONT_HERSHEY_DUPLEX
             id_scale  = 1.6          # Large and readable
             id_thick  = 2

@@ -1,6 +1,5 @@
 """Independent recorded-footage review. python -m src.web_review"""
 import argparse
-import copy
 import hashlib
 import io
 import json
@@ -8,22 +7,20 @@ import math
 from pathlib import Path
 import secrets
 import threading
-import tempfile
 from functools import wraps
 from fractions import Fraction
 
 from flask import Flask, abort, jsonify, request, send_file
-from src.action_events import fingerprint, load_actions
+from markdown_it import MarkdownIt
+from src.action_events import fingerprint
 from src.action_labels import LABELS
+from src.office_map import build_office_map, camera_stem, movement_history, office_chat_context, overview_frames, schematic
 from src.tracking_log import saved_detection_counts
-from src.ai_assistant import AIAssistant
+from src.ai_assistant import AIAssistant, parse_requested_ids
+from src.identity_review import TrackingChanged, atomic_json, save_identity_correction
 
 
-def atomic_json(path, data):
-    with tempfile.NamedTemporaryFile('w', dir=path.parent, delete=False, suffix='.json') as handle:
-        json.dump(data, handle, indent=2)
-        temporary = Path(handle.name)
-    temporary.replace(path)
+CHAT_MARKDOWN = MarkdownIt('commonmark', {'html': False}).enable('table').disable('image')
 
 
 def overlay_boxes(frames, start, end, fps):
@@ -38,7 +35,7 @@ def overlay_boxes(frames, start, end, fps):
         for box in boxes:
             counts[box['gid']] = counts.get(box['gid'], 0) + 1
         for box in boxes:
-            if counts[box['gid']] == 1:
+            if box['gid'] >= 0 and counts[box['gid']] == 1:
                 by_id.setdefault(box['gid'], []).append((frame, box['bbox']))
     for gid, observations in by_id.items():
         for (before, old), (after, new) in zip(observations, observations[1:]):
@@ -58,9 +55,14 @@ def overlay_boxes(frames, start, end, fps):
                 if any(box['gid'] == gid for box in current):
                     continue
                 blend = (frame - before) / (after - before)
-                current.append({'gid': gid,
-                                'bbox': [round(a + (b - a) * blend) for a, b in zip(old, new)],
-                                'interpolated': True})
+                bbox = [round(a + (b - a) * blend) for a, b in zip(old, new)]
+                # An observed Unknown box takes precedence over an overlapping guess.
+                x1, y1, x2, y2 = bbox
+                unknown_boxes = (box['bbox'] for box in current if box['gid'] < 0)
+                if any(max(x1, left) < min(x2, right) and max(y1, top) < min(y2, bottom)
+                       for left, top, right, bottom in unknown_boxes):
+                    continue
+                current.append({'gid': gid, 'bbox': bbox, 'interpolated': True})
     return result
 
 
@@ -103,10 +105,31 @@ def prepare_video(source, cache, fps=None):
     return target
 
 
-def create_app(output_dir, data_dir, prepare=True):
+def create_app(output_dir, data_dir, prepare=True, office_map_path=None):
     output, data_dir = Path(output_dir).resolve(), Path(data_dir).resolve()
     log = output / 'tracking_log.json'
     data = json.loads(log.read_text())
+    sketch = (json.loads(Path(office_map_path).read_text(encoding='utf-8'))
+              if office_map_path else schematic(data['cameras']))
+    map_key = fingerprint(sketch)
+    pins_file = output / 'office_camera_placements.json'
+
+    def read_pins():
+        try:
+            saved = json.loads(pins_file.read_text(encoding='utf-8'))
+        except FileNotFoundError:
+            return {}
+        if not isinstance(saved, dict):
+            raise ValueError('Invalid saved camera layout')
+        return saved
+
+    def build_layout(edits):
+        layout, lookup = build_office_map(data['cameras'], sketch, is_schematic=office_map_path is None,
+                                          overrides=edits)
+        layout['revision'] = fingerprint([map_key, edits])
+        return layout, lookup
+
+    office_map, placements = build_layout(read_pins().get(map_key, {}))
     assistant = AIAssistant(data, output)
     lock = threading.Lock()
     ai_lock = threading.Lock()
@@ -132,6 +155,9 @@ def create_app(output_dir, data_dir, prepare=True):
     for cid, camera in data['cameras'].items():
         raw = data_dir / (camera.get('raw_video_file') or camera['video_file'].replace('_tracked.mp4', '.mp4'))
         tracked = output / camera['video_file']
+        if data.get('identities_reviewed') and tracked.is_file() and not raw.is_file():
+            media[cid] = {'available': False, 'requires_original': True}
+            continue
         source = raw if raw.is_file() else tracked
         if not source.is_file():
             media[cid] = {'available': False}
@@ -174,8 +200,60 @@ def create_app(output_dir, data_dir, prepare=True):
             cameras = {cid: {**meta, **{k: v for k, v in media[cid].items() if k != 'path'}}
                        for cid, meta in data['cameras'].items()}
             return jsonify(token=token, revision=revision, cameras=cameras, persons=data['persons'],
+                           office_map=office_map,
                            person_counts=saved_detection_counts(data.get('detections', {})),
                            actions=assistant.action_data, labels=list(LABELS.values()), selected=settings)
+
+    @app.get('/api/office-map/<int:person_id>')
+    def person_movement(person_id):
+        with lock:
+            person = data['persons'].get(str(person_id))
+            if person is None:
+                abort(404)
+            cameras, frames = data['cameras'], data.get('detections', {})
+            history_revision = revision
+            history_placements, map_revision = placements, office_map['revision']
+        history = movement_history(person_id, cameras, frames, person.get('appearances', []), history_placements, media)
+        return jsonify(revision=history_revision, map_revision=map_revision, **history)
+
+    @app.get('/api/office-map/overview/<int:chunk>')
+    def map_overview(chunk):
+        with lock:
+            tracking = dict(data)
+            overview_placements = placements
+            tracking_revision, map_revision = revision, office_map['revision']
+        frames = overview_frames(tracking, overview_placements, media, chunk * 10, (chunk + 1) * 10)
+        return jsonify(revision=tracking_revision, map_revision=map_revision, frames=frames)
+
+    @app.post('/api/office-map/placements')
+    def save_camera_placements():
+        nonlocal office_map, placements
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or not isinstance(body.get('cameras'), dict):
+            return jsonify(error='Expected camera placements'), 400
+        edits = body['cameras']
+        with lock:
+            if any(cid not in data['cameras'] or not isinstance(pin, dict) for cid, pin in edits.items()):
+                return jsonify(error='Choose cameras from the current recording'), 400
+            try:
+                saved = read_pins()
+                overrides = saved.get(map_key, {})
+                if (body.get('revision') != office_map['revision'] or
+                        fingerprint([map_key, overrides]) != office_map['revision']):
+                    return jsonify(error='The camera layout changed. Reload before saving again.'), 409
+                for cid, pin in edits.items():
+                    overrides[camera_stem(data['cameras'][cid])] = {
+                        key: pin.get(key) for key in ('zone', 'floor', 'position', 'heading')
+                    }
+                updated, lookup = build_layout(overrides)
+                saved[map_key] = overrides
+                atomic_json(pins_file, saved)
+            except (TypeError, ValueError, KeyError) as exc:
+                return jsonify(error=str(exc)), 400
+            except OSError:
+                return jsonify(error='Could not save the camera layout to the output folder'), 500
+            office_map, placements = updated, lookup
+        return jsonify(office_map=updated)
 
     @app.get('/video/<int:camera_id>')
     def video(camera_id):
@@ -208,14 +286,24 @@ def create_app(output_dir, data_dir, prepare=True):
 
     @app.post('/api/chat')
     def chat():
-        prompt = (request.get_json() or {}).get('prompt', '')
-        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 10000:
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            abort(400)
+        prompt, view = body.get('prompt', ''), body.get('view', {})
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 10000 or not isinstance(view, dict):
             abort(400)
         if not ai_lock.acquire(blocking=False):
             return jsonify(error='Another operation is running. Try again shortly.'), 409
         try:
-            reply = assistant.ask(prompt)
-            return jsonify(reply=reply, evidence=assistant.get_visual_evidence(prompt, reply))
+            with lock:
+                chat_layout, chat_placements = office_map, placements
+                tracking = dict(data)
+            context = office_chat_context(chat_layout, tracking, chat_placements, media, view,
+                                          parse_requested_ids(prompt))
+            reply = assistant.ask(prompt, office_context=context)
+            return jsonify(reply=reply, reply_html=CHAT_MARKDOWN.render(reply),
+                           prompt_html=CHAT_MARKDOWN.render(prompt),
+                           evidence=assistant.get_visual_evidence(prompt, reply))
         except Exception:
             app.logger.exception('Assistant request failed')
             return jsonify(error='Assistant request failed. Check your API configuration and server console.'), 502
@@ -246,61 +334,62 @@ def create_app(output_dir, data_dir, prepare=True):
             document.seek(0)
         return send_file(document, mimetype='application/pdf', as_attachment=True, download_name='sensen-person-summary.pdf')
 
-    @app.post('/api/merge')
-    @assistant_operation
-    def merge():
+    def correct_person(merge):
         nonlocal revision
-        body = request.get_json() or {}
-        source, target = str(body.get('source')), str(body.get('target'))
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            abort(400)
+        try:
+            source = int(str(body.get('source')))
+            target = int(str(body.get('target'))) if merge else None
+        except ValueError:
+            abort(400)
         with lock:
-            if body.get('revision') != revision or fingerprint(json.loads(log.read_text())) != revision:
-                return jsonify(error='Tracking data changed. Restart web review before merging.'), 409
-            if source == target or source not in data['persons'] or target not in data['persons']:
-                abort(400)
-            if any(not item.get('raw', False) for item in media.values()):
-                return jsonify(error='Original videos are required to redraw merged IDs correctly.'), 409
-            updated = copy.deepcopy(data)
-            src, dst = updated['persons'][source], updated['persons'][target]
-            dst['appearances'] = sorted(dst.get('appearances', [])+src.get('appearances', []),
-                                        key=lambda a: (a['camera_id'], a['first_frame']))
-            dst['cameras_seen'] = sorted(set(dst.get('cameras_seen', [])) | set(src.get('cameras_seen', [])))
-            dst['total_detections'] = dst.get('total_detections', 0)+src.get('total_detections', 0)
-            thumbnails = []
-            for person in (dst, src):
-                for image in person.get('thumbnails_b64') or [person.get('thumbnail_b64')]:
-                    if image and image not in thumbnails:
-                        thumbnails.append(image)
-            dst['thumbnails_b64'] = thumbnails[:3]
-            dst['thumbnail_b64'] = thumbnails[0] if thumbnails else None
-            for frames in updated.get('detections', {}).values():
-                for detections in frames.values():
-                    for detection in detections:
-                        if detection.get('gid') == int(source) or detection.get('global_id') == int(source):
-                            detection['gid'] = detection['global_id'] = int(target)
-            del updated['persons'][source]
-            backup = output / f'tracking_log.before-merge-{revision[:12]}.json'
-            if not backup.exists():
-                atomic_json(backup, data)
-            atomic_json(log, updated)
+            if body.get('revision') != revision:
+                return jsonify(error='Tracking data changed. Reload before editing IDs.'), 409
+            if any(item.get('available') and not item.get('raw') for item in media.values()):
+                return jsonify(error='Open review with the original videos to edit IDs that are baked into the tracked copies.'), 409
+            try:
+                updated, remapped, activity_note = save_identity_correction(output, data, source, target)
+            except TrackingChanged as exc:
+                return jsonify(error=str(exc)), 409
+            except ValueError as exc:
+                return jsonify(error=str(exc)), 400
+            except OSError:
+                return jsonify(error='Could not save the identity correction.'), 500
             data.clear()
             data.update(updated)
             revision = fingerprint(data)
-            assistant._profiles = assistant._load_profiles()
-            assistant.action_data = load_actions(data, output)
-            assistant.clear_history()
-        return jsonify(ok=True)
+            assistant.refresh_reviewed_identities(remapped)
+        return jsonify(ok=True, kept_id=remapped.get(target), activity_note=activity_note)
+
+    @app.post('/api/merge')
+    @assistant_operation
+    def merge():
+        return correct_person(merge=True)
+
+    @app.post('/api/delete-id')
+    @assistant_operation
+    def delete_id():
+        return correct_person(merge=False)
 
     return app
 
 
 def main():
-    from src.config import DATA_DIR, OUTPUT_DIR
+    from src.config import BASE_DIR, DATA_DIR, OUTPUT_DIR
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output-dir', default=str(OUTPUT_DIR))
     parser.add_argument('--data-dir', default=str(DATA_DIR))
     parser.add_argument('--port', type=int, default=5002)
+    default_map = BASE_DIR / 'config' / 'office_map.json'
+    parser.add_argument('--office-map', type=Path, default=default_map if default_map.is_file() else None,
+                        help='Building layout JSON (default: config/office_map.json when present)')
     args = parser.parse_args()
-    app = create_app(args.output_dir, args.data_dir)
+    try:
+        app = create_app(args.output_dir, args.data_dir, office_map_path=args.office_map)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        parser.exit(1, f'Could not open web review: {exc}\n')
     print(f'Web review ready: http://127.0.0.1:{args.port}', flush=True)
     app.run(host='127.0.0.1', port=args.port, threaded=True, debug=False)
 

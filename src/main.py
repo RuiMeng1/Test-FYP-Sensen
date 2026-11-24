@@ -7,19 +7,19 @@ Two-phase workflow:
 
 Usage:
   # Full pipeline: process → review
-  python -m src.main
+  python -m src.main --all-id-cameras
 
   # Pick specific videos
-  python -m src.main --videos data/cam1.mp4 data/cam2.mp4
+  python -m src.main --videos data/cam1.mp4 data/cam2.mp4 --new-id-cameras cam1
 
   # Skip the review UI (headless processing only)
-  python -m src.main --no-preview
+  python -m src.main --use-saved-id-cameras --no-preview
 
   # Only open the review UI (skip processing, use existing output)
   python -m src.main --review-only
 
   # Force device
-  python -m src.main --device cpu
+  python -m src.main --all-id-cameras --device cpu
 """
 
 from __future__ import annotations
@@ -34,8 +34,8 @@ import numpy as np
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    from src.video_loader import parse_args, get_video_paths
-    from src.config import OUTPUT_DIR
+    from src.video_loader import parse_args, get_video_paths, print_camera_list, resolve_new_id_cameras
+    from src.config import OUTPUT_DIR, PIPELINE_SETTINGS_PATH
     from src.tracking_log import TrackingLog
 
     args          = parse_args()
@@ -47,7 +47,7 @@ def main() -> None:
         log_path = OUTPUT_DIR / "tracking_log.json"
         if not log_path.exists():
             print(f"[Main] ERROR: No tracking log found at {log_path}")
-            print(f"       Run processing first: python -m src.main")
+            print("       Run processing first: python -m src.main --all-id-cameras")
             return
 
         print(f"[Main] Loading tracking log from {log_path} …")
@@ -58,6 +58,16 @@ def main() -> None:
         ui.run()
         return
 
+    video_paths = get_video_paths(args)
+    if args.list_cameras:
+        print_camera_list(video_paths)
+        return
+    try:
+        new_id_cameras = resolve_new_id_cameras(args, video_paths, PIPELINE_SETTINGS_PATH)
+    except ValueError as exc:
+        print_camera_list(video_paths)
+        raise SystemExit(str(exc)) from None
+
     # ── Phase 1: Pre-process (headless) ───────────────────────────────────────
     from src.config import DEVICE, REID_DEVICE, REID_EVERY_N_FRAMES, TRANSREID_WEIGHTS
     from src.config import REID_THRESHOLD, GALLERY_TTL_FRAMES, YOLO_MODEL_NAME
@@ -67,7 +77,6 @@ def main() -> None:
     from src.gallery import GlobalGallery
     from src.pipeline import CameraWorker
 
-    video_paths   = get_video_paths(args)
     device        = args.device or DEVICE
     reid_interval = args.reid_interval or REID_EVERY_N_FRAMES
 
@@ -83,6 +92,9 @@ def main() -> None:
     print(f"  ReID device   : {reid_dev.upper()}  "
           f"{'(MPS → CPU for thread safety)' if device == 'mps' else ''}")
     print(f"  Cameras       : {len(video_paths)}")
+    id_sources = ('All cameras' if new_id_cameras is None else
+                  ', '.join(video_paths[number - 1].name for number in sorted(new_id_cameras)))
+    print(f"  New IDs from  : {id_sources}")
     print(f"  Re-ID every   : {reid_interval} frames")
     print(f"  Review UI     : {'AFTER PROCESSING' if show_preview else 'OFF'}")
     print(f"  Output dir    : output/")
@@ -110,6 +122,7 @@ def main() -> None:
         ttl_frames=GALLERY_TTL_FRAMES,
         threshold_matrix=REID_THRESHOLD_MATRIX,
         camera_name_map=camera_name_map,
+        new_id_camera_ids=new_id_cameras,
     )
 
     # ── Tracking log ──────────────────────────────────────────────────────────
@@ -200,7 +213,7 @@ def main() -> None:
         except (ImportError, ModuleNotFoundError) as e:
             print(f"[Main] Note: Tkinter desktop UI unavailable ({e}).")
             print(f"[Main] ✦ To open the Web Review Dashboard & OpenAI AI Assistant, run:\n")
-            print(f"       python scripts/run_web_ui.py\n")
+            print("       python -m src.web_review\n")
 
 
 

@@ -1,6 +1,6 @@
 # Occlusion diagnostics
 
-Run `python -m src.main --no-preview` normally. Each camera writes a uniquely
+Run `python -m src.main --all-id-cameras --no-preview` for ordinary tracking. Each camera writes a uniquely
 named JSONL file under `output/occlusion_logs/`; previous runs are retained.
 Each line is a JSON event with source filename, camera, frame, seconds, local ID,
 global ID (or -1 if unknown), and available bounding-box evidence.

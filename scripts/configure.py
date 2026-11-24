@@ -24,7 +24,7 @@ import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 ROOT       = Path(__file__).parent.parent
@@ -69,13 +69,27 @@ def _save_settings(data: dict) -> None:
     print(f"[Config] Saved → {SETTINGS_FILE}")
 
 
-def _scan_cameras() -> list[dict]:
-    """Return list of {stem, filename} for every .mp4 in data/."""
-    cameras = []
-    if DATA_DIR.exists():
-        for p in sorted(DATA_DIR.glob("*.mp4")):
-            cameras.append({"stem": p.stem, "filename": p.name})
-    return cameras
+def _scan_cameras(data_dir: Path) -> list[dict]:
+    return [{"stem": path.stem, "filename": path.name}
+            for path in sorted(data_dir.glob("*.mp4")) if path.is_file()]
+
+
+def _camera_preview(path: Path) -> bytes | None:
+    import cv2
+
+    capture = cv2.VideoCapture(str(path))
+    try:
+        ok, frame = capture.read()
+        if not ok:
+            return None
+        height, width = frame.shape[:2]
+        scale = min(1, 480 / width, 270 / height)
+        size = (max(1, round(width * scale)), max(1, round(height * scale)))
+        frame = cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
+        ok, jpeg = cv2.imencode('.jpg', frame)
+        return jpeg.tobytes() if ok else None
+    finally:
+        capture.release()
 
 
 # ── HTML UI (self-contained) ─────────────────────────────────────────────────
@@ -188,6 +202,25 @@ HTML = r"""<!DOCTYPE html>
   .section-header p  { font-size: 0.78rem; color: var(--muted); margin-top: 2px; }
 
   .section-body { padding: 24px; }
+
+  .id-modes { display: flex; flex-wrap: wrap; gap: 12px 24px; margin-bottom: 16px; }
+  .id-modes label, .id-camera-name { display: flex; align-items: center; gap: 9px; }
+  .id-modes input, .id-camera-name input { accent-color: var(--accent); }
+  .id-camera-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+    gap: 12px; margin-bottom: 16px; border: 0; min-width: 0;
+  }
+  .id-camera-grid:disabled { opacity: .65; }
+  .id-camera-card { display: block; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .id-camera-card:has(input:checked) { border-color: var(--accent); }
+  .id-camera-preview {
+    aspect-ratio: 16 / 9; background: var(--bg); display: grid; place-items: center;
+    color: var(--text); font-size: .8rem;
+  }
+  .id-camera-preview img { width: 100%; height: 100%; object-fit: contain; }
+  .id-camera-name { padding: 11px; overflow-wrap: anywhere; font-size: .84rem; }
+  .id-camera-note { color: var(--yellow); margin-bottom: 12px; font-size: .85rem; }
+  .id-camera-command { font-size: .85rem; line-height: 1.6; overflow-wrap: anywhere; }
 
   /* ── Global settings grid ── */
   .settings-grid {
@@ -414,6 +447,24 @@ HTML = r"""<!DOCTYPE html>
 
 <div class="container">
 
+  <div class="section">
+    <div class="section-header">
+      <div>
+        <h2>New Person IDs</h2>
+        <p>Choose which cameras can give an unmatched person a new global ID.</p>
+      </div>
+    </div>
+    <div class="section-body">
+      <div class="id-modes" role="group" aria-label="Which cameras can create IDs">
+        <label><input type="radio" name="new_id_mode" id="ids-all" checked> All cameras</label>
+        <label><input type="radio" name="new_id_mode" id="ids-selected"> Selected cameras only</label>
+      </div>
+      <fieldset id="id-camera-grid" class="id-camera-grid" aria-label="Camera previews" disabled></fieldset>
+      <p id="id-camera-note" class="id-camera-note" hidden></p>
+      <p class="id-camera-command">Click <strong>Save Settings</strong>, then run <code>python -m src.main --use-saved-id-cameras</code>.</p>
+    </div>
+  </div>
+
   <!-- ── Global Settings ── -->
   <div class="section">
     <div class="section-header">
@@ -536,11 +587,56 @@ async function init() {
     cameras = await camRes.json();
     savedSettings = await settRes.json();
     applySettings(savedSettings);
+    renderIdCameras(savedSettings.new_id_cameras);
     renderPairs();
   } catch(e) {
     showToast('⚠ Could not load data: ' + e.message, 'error');
   }
 }
+
+function renderIdCameras(selection) {
+  const restricted = Array.isArray(selection);
+  const selected = new Set(restricted ? selection : []);
+  document.getElementById(restricted ? 'ids-selected' : 'ids-all').checked = true;
+  const grid = document.getElementById('id-camera-grid');
+  grid.replaceChildren();
+  cameras.forEach((camera, index) => {
+    const card = document.createElement('label');
+    card.className = 'id-camera-card';
+    const preview = document.createElement('div');
+    preview.className = 'id-camera-preview';
+    const image = document.createElement('img');
+    image.alt = `View from ${camera.filename}`;
+    image.loading = 'lazy';
+    image.addEventListener('error', () => { preview.textContent = 'Preview unavailable'; });
+    image.src = '/api/camera-preview?' + new URLSearchParams({filename: camera.filename});
+    preview.append(image);
+
+    const name = document.createElement('span');
+    name.className = 'id-camera-name';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = camera.stem;
+    checkbox.checked = selected.has(camera.stem);
+    name.append(checkbox, `Camera ${index + 1} · ${camera.filename}`);
+    card.append(preview, name);
+    grid.append(card);
+  });
+  const note = document.getElementById('id-camera-note');
+  const missing = [...selected].filter(stem => !cameras.some(camera => camera.stem === stem));
+  note.textContent = cameras.length === 0 ? 'No camera videos found in this folder.' :
+    (missing.length ? `Saved cameras missing from this folder: ${missing.join(', ')}.` : '');
+  note.hidden = !note.textContent;
+  updateIdCameraMode();
+}
+
+function updateIdCameraMode() {
+  document.getElementById('id-camera-grid').disabled = !document.getElementById('ids-selected').checked;
+}
+
+document.querySelectorAll('input[name="new_id_mode"]').forEach(input => {
+  input.addEventListener('change', updateIdCameraMode);
+});
 
 function applySettings(s) {
   document.getElementById('global_threshold').value    = s.global_threshold    ?? 0.65;
@@ -553,6 +649,11 @@ function applySettings(s) {
 // ── Render camera pair rows ───────────────────────────────────────────────────
 function pairKey(a, b) {
   return [a, b].sort().join('|');
+}
+
+function escapeHTML(value) {
+  const entities = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'};
+  return String(value).replace(/[&<>"']/g, char => entities[char]);
 }
 
 function thresholdLabel(v) {
@@ -584,36 +685,35 @@ function renderPairs() {
 
   list.innerHTML = pairs.map(([a, b]) => {
     const key = pairKey(a.stem, b.stem);
+    const id = escapeHTML(key);
     const useGlobal = !(savedSettings.pair_thresholds && key in savedSettings.pair_thresholds);
     const val = useGlobal
       ? (savedSettings.global_threshold ?? 0.65)
       : savedSettings.pair_thresholds[key];
 
     return `
-      <div class="pair-card" id="card-${key}">
+      <div class="pair-card" id="card-${id}">
         <div class="cam-pill">
           <div class="cam-id">Camera ${cameras.indexOf(a)+1}</div>
-          <div class="cam-stem">${a.stem}</div>
+          <div class="cam-stem">${escapeHTML(a.stem)}</div>
         </div>
         <div class="pair-arrow">↔</div>
         <div class="cam-pill">
           <div class="cam-id">Camera ${cameras.indexOf(b)+1}</div>
-          <div class="cam-stem">${b.stem}</div>
+          <div class="cam-stem">${escapeHTML(b.stem)}</div>
         </div>
         <div class="threshold-control">
           <div class="pair-use-global">
-            <input type="checkbox" id="chk-${key}" ${useGlobal ? 'checked' : ''}
-              onchange="toggleGlobal('${key}', this.checked, '${a.stem}', '${b.stem}')">
-            <label for="chk-${key}">Use global threshold</label>
+            <input type="checkbox" id="chk-${id}" ${useGlobal ? 'checked' : ''}>
+            <label for="chk-${id}">Use global threshold</label>
           </div>
-          <div class="threshold-row" id="row-${key}" style="${useGlobal ? 'opacity:0.35;pointer-events:none' : ''}">
-            <input type="range" id="slider-${key}"
+          <div class="threshold-row" id="row-${id}" style="${useGlobal ? 'opacity:0.35;pointer-events:none' : ''}">
+            <input type="range" id="slider-${id}"
               min="0.40" max="0.90" step="0.01"
-              value="${val}"
-              oninput="updateSlider('${key}', this.value)"
+              value="${escapeHTML(val)}"
               style="--track: ${sliderColor(val)}">
-            <span class="threshold-value" id="val-${key}">${parseFloat(val).toFixed(2)}</span>
-            <span id="lbl-${key}">${thresholdLabel(val)}</span>
+            <span class="threshold-value" id="val-${id}">${parseFloat(val).toFixed(2)}</span>
+            <span id="lbl-${id}">${thresholdLabel(val)}</span>
           </div>
         </div>
       </div>`;
@@ -622,6 +722,10 @@ function renderPairs() {
   // Style slider tracks
   pairs.forEach(([a,b]) => {
     const key = pairKey(a.stem, b.stem);
+    const checkbox = document.getElementById('chk-' + key);
+    const slider = document.getElementById('slider-' + key);
+    checkbox.addEventListener('change', () => toggleGlobal(key, checkbox.checked));
+    slider.addEventListener('input', () => updateSlider(key, slider.value));
     styleSlider(key);
   });
 }
@@ -644,7 +748,7 @@ function updateSlider(key, rawVal) {
   styleSlider(key);
 }
 
-function toggleGlobal(key, useGlobal, stemA, stemB) {
+function toggleGlobal(key, useGlobal) {
   const row = document.getElementById('row-' + key);
   if (useGlobal) {
     row.style.opacity = '0.35';
@@ -662,12 +766,19 @@ function toggleGlobal(key, useGlobal, stemA, stemB) {
 // ── Collect settings from UI ──────────────────────────────────────────────────
 function collectSettings() {
   const globalThresh = parseFloat(document.getElementById('global_threshold').value);
-  const pairThresholds = {};
+  const pairThresholds = {...savedSettings.pair_thresholds};
+  const newIdCameras = document.getElementById('ids-selected').checked
+    ? [...document.querySelectorAll('#id-camera-grid input:checked')].map(input => input.value)
+    : null;
+  if (newIdCameras?.length === 0) throw new Error('Select at least one camera that can create new IDs.');
 
   document.querySelectorAll('.pair-card').forEach(card => {
     const key = card.id.replace('card-', '');
     const chk = document.getElementById('chk-' + key);
-    if (!chk || chk.checked) return; // using global → don't store
+    if (!chk || chk.checked) {
+      delete pairThresholds[key];
+      return;
+    }
     const val = parseFloat(document.getElementById('slider-' + key).value);
     pairThresholds[key] = val;
   });
@@ -679,13 +790,14 @@ function collectSettings() {
     max_exemplars:       parseInt(document.getElementById('max_exemplars').value),
     ema_alpha:           parseFloat(document.getElementById('ema_alpha').value),
     pair_thresholds:     pairThresholds,
+    new_id_cameras:      newIdCameras,
   };
 }
 
 // ── Save ──────────────────────────────────────────────────────────────────────
 async function saveSettings() {
-  const data = collectSettings();
   try {
+    const data = collectSettings();
     const res = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -695,7 +807,8 @@ async function saveSettings() {
       savedSettings = data;
       showToast('✓ Settings saved to config/pipeline_settings.json', 'success');
     } else {
-      showToast('✗ Server error: ' + res.status, 'error');
+      const response = await res.json();
+      showToast('✗ ' + (response.error || `Server error: ${res.status}`), 'error');
     }
   } catch(e) {
     showToast('✗ ' + e.message, 'error');
@@ -707,10 +820,11 @@ function resetToDefaults() {
   const defaults = {
     global_threshold: 0.65, reid_every_n_frames: 5,
     gallery_ttl_frames: 50000, max_exemplars: 8, ema_alpha: 0.15,
-    pair_thresholds: {}
+    pair_thresholds: {}, new_id_cameras: null
   };
   applySettings(defaults);
   savedSettings = defaults;
+  renderIdCameras(defaults.new_id_cameras);
   renderPairs();
   showToast('↺ Reset to defaults', 'success');
 }
@@ -743,6 +857,8 @@ init();
 # ── HTTP Handler ─────────────────────────────────────────────────────────────
 
 class ConfigHandler(BaseHTTPRequestHandler):
+    data_dir = DATA_DIR
+
     def log_message(self, fmt, *args):
         # Suppress default access log spam; only show errors
         try:
@@ -759,7 +875,14 @@ class ConfigHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _is_local_host(self) -> bool:
+        host = self.headers.get('Host', '').lower().split(':', 1)[0]
+        return host in {'localhost', '127.0.0.1'}
+
     def do_GET(self):
+        if not self._is_local_host():
+            self.send_error(403)
+            return
         parsed = urlparse(self.path)
         path   = parsed.path
 
@@ -772,7 +895,23 @@ class ConfigHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
         elif path == "/api/cameras":
-            self._send_json(_scan_cameras())
+            self._send_json(_scan_cameras(self.data_dir))
+
+        elif path == '/api/camera-preview':
+            filename = parse_qs(parsed.query).get('filename', [''])[0]
+            if not any(camera['filename'] == filename for camera in _scan_cameras(self.data_dir)):
+                self.send_error(404)
+                return
+            preview = _camera_preview(self.data_dir / filename)
+            if preview is None:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/jpeg')
+            self.send_header('Content-Length', str(len(preview)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(preview)
 
         elif path == "/api/settings":
             self._send_json(_load_settings())
@@ -781,13 +920,29 @@ class ConfigHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
+        if not self._is_local_host():
+            self.send_error(403)
+            return
         if self.path == "/api/settings":
-            length = int(self.headers.get("Content-Length", 0))
-            body   = self.rfile.read(length)
+            if self.headers.get_content_type() != 'application/json':
+                self._send_json({'error': 'Expected JSON settings.'}, 415)
+                return
             try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length)
                 data = json.loads(body)
+                if not isinstance(data, dict):
+                    raise ValueError('Settings must be a JSON object.')
+                selection = data.get('new_id_cameras')
+                if selection is not None:
+                    available = {camera['stem'] for camera in _scan_cameras(self.data_dir)}
+                    if (not isinstance(selection, list) or not selection or
+                            any(not isinstance(stem, str) or stem not in available for stem in selection)):
+                        raise ValueError('Choose at least one camera from the preview list.')
                 _save_settings(data)
                 self._send_json({"status": "ok"})
+            except ValueError as e:
+                self._send_json({"error": str(e)}, 400)
             except Exception as e:
                 self._send_json({"error": str(e)}, 500)
         else:
@@ -800,16 +955,19 @@ def main():
     parser = argparse.ArgumentParser(description="Launch pipeline configuration UI")
     parser.add_argument("--port",       type=int, default=7700, help="Local port (default 7700)")
     parser.add_argument("--no-browser", action="store_true",    help="Don't open browser automatically")
+    parser.add_argument('--data-dir', type=Path, default=DATA_DIR,
+                        help='Folder containing the camera videos (default: data/).')
     args = parser.parse_args()
 
     url = f"http://localhost:{args.port}"
+    ConfigHandler.data_dir = args.data_dir.resolve()
     server = HTTPServer(("localhost", args.port), ConfigHandler)
 
     print(f"\n{'='*55}")
     print(f"  Pipeline Configuration UI")
     print(f"{'='*55}")
     print(f"  URL     : {url}")
-    print(f"  Cameras : {DATA_DIR}")
+    print(f"  Cameras : {ConfigHandler.data_dir}")
     print(f"  Config  : {SETTINGS_FILE}")
     print(f"{'='*55}")
     print(f"  Press  Ctrl+C  to stop\n")

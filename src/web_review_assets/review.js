@@ -22,8 +22,24 @@ let state,
   people = new Map(),
   chunks = new Map(),
   requests = new Map(),
-  mergeSource = null,
+  editSource = null,
   busy = false;
+const officeMap = new OfficeMap({
+  requestHistory: (person) => api(`/api/office-map/${person}`),
+  requestOverview: (index) => api(`/api/office-map/overview/${index}`),
+  follow: (gid, camera) => follow(gid, camera),
+  seek: (t) => { setPlaying(false); seek(t); },
+  jump: (camera, t) => { setPlaying(false); jump(camera, t, followed); },
+  togglePlayback: () => $("play").click(),
+});
+const officeEditor = new OfficeCameraEditor({
+  save: (changes) => api("/api/office-map/placements", changes),
+  onSaved: ({office_map}) => {
+    state.office_map = office_map;
+    if (officeMap.open) showOfficeMap();
+    notice("Camera layout saved.");
+  },
+});
 function notice(text) {
   $("notice").textContent = text;
 }
@@ -69,7 +85,7 @@ function activeCameras(person, t = time) {
   return (person.appearances || [])
     .filter((a) => {
       const fps = state.cameras[a.camera_id]?.fps || 25;
-      return t >= a.first_frame / fps && t <= a.last_frame / fps;
+      return t >= a.first_frame / fps && t < (a.last_frame + 1) / fps;
     })
     .map((a) => String(a.camera_id));
 }
@@ -107,7 +123,7 @@ function view(cid) {
     if (tile.card.hidden) tile.video.pause();
     else {
       if (Math.abs(tile.video.currentTime - time) > 0.2)
-        tile.video.currentTime = time;
+        tile.video.currentTime = Math.min(time, Number.isFinite(tile.video.duration) ? tile.video.duration : time);
       if (playing) playVideo(tile);
     }
   }
@@ -128,6 +144,7 @@ function setPlaying(value) {
     if (value && visibleCameras().includes(cid)) playVideo(tile);
     else tile.video.pause();
   }
+  officeMap.update(time, playing);
 }
 function seek(t) {
   time = Math.max(0, Math.min(duration, t));
@@ -142,22 +159,30 @@ function seek(t) {
   }
   updateUI();
 }
-function follow(gid) {
+function follow(gid, camera) {
   followed = String(gid);
   $("followBar").hidden = false;
   $("followText").textContent = `Following Person ${gid}`;
   const p = state.persons[gid],
     cams = activeCameras(p);
-  if (cams.length) view(cams[0]);
+  if (camera && state.cameras[camera]) view(camera);
+  else if (cams.length) view(cams[0]);
   else if (p.appearances?.length) {
     const a = p.appearances[0];
     view(String(a.camera_id));
     seek(a.first_frame / state.cameras[a.camera_id].fps);
   }
+  showOfficeMap();
 }
 function stopFollow() {
+  const wasFollowing = followed !== null;
   followed = null;
   $("followBar").hidden = true;
+  if (wasFollowing) officeMap.setOpen(false);
+}
+function showOfficeMap() {
+  officeMap.show(followed, state, duration);
+  officeMap.update(time, playing);
 }
 function jump(cid, t, gid) {
   $("workspaceTab").click();
@@ -168,6 +193,7 @@ function jump(cid, t, gid) {
   }
   view(String(cid));
   seek(t);
+  if (officeMap.open) showOfficeMap();
 }
 function buildCameras() {
   for (const t of tiles.values()) t.video.pause();
@@ -201,7 +227,7 @@ function buildCameras() {
     video.preload = "auto";
     video.loop = false;
     if (c.available) video.src = `/video/${cid}`;
-    else status.textContent = "Recording unavailable";
+    else status.textContent = c.requires_original ? "Original video needed for corrected IDs" : "Recording unavailable";
     const tile = { card, video, canvas, status };
     tiles.set(cid, tile);
     video.addEventListener("loadedmetadata", () => {
@@ -307,6 +333,7 @@ function buildPeople() {
         follow(gid);
       }),
       button("Merge with…", () => openMerge(gid)),
+      button("Delete ID…", () => openDeleteId(gid), "danger"),
     );
     g.append(controls);
     $("galleryCards").append(g);
@@ -314,6 +341,7 @@ function buildPeople() {
   updateUI();
 }
 function updateUI() {
+  officeMap.update(time, playing);
   for (const [gid, p] of people) {
     const cams = activeCameras(state.persons[gid]),
       signature = cams.join(",");
@@ -358,7 +386,8 @@ function draw(cid, tile) {
     const [x1, y1, x2, y2] = d.bbox,
       x = ox + x1 * sx,
       y = oy + y1 * sy;
-    const color = state.persons[d.gid]?.color_hex || "#67dccc";
+    const unknown = d.gid < 0;
+    const color = unknown ? "#b1bac7" : state.persons[d.gid]?.color_hex || "#67dccc";
     ctx.font = "12px system-ui";
     if (showBoxes && c.raw) {
       ctx.strokeStyle = color;
@@ -368,12 +397,12 @@ function draw(cid, tile) {
       ctx.fillRect(x, Math.max(oy, y - 20), 70, 20);
       ctx.fillStyle = "#061018";
       ctx.fillText(
-        `ID:${String(d.gid).padStart(3, "0")}`,
+        unknown ? "Unknown" : `ID:${String(d.gid).padStart(3, "0")}`,
         x + 5,
         Math.max(oy, y - 20) + 14,
       );
     }
-    if (counts[d.gid] !== 1) continue;
+    if (unknown || counts[d.gid] !== 1) continue;
     const labels = (state.actions.events || [])
       .filter(
         (e) =>
@@ -400,17 +429,24 @@ let lastTick = 0,
   lastUI = 0;
 function tick(now) {
   if (state && now - lastTick > 40) {
+    const elapsed = Math.min(.25, (now - lastTick) / 1000);
     lastTick = now;
     const ids = visibleCameras(),
       master = ids
         .map((id) => tiles.get(id))
         .find((t) => !t.video.ended && t.video.readyState >= 2);
-    if (playing && master) {
+    if (playing && officeMap.open) {
+      time = Math.min(duration, time + elapsed * speed);
+      if (time >= duration) setPlaying(false);
+    } else if (playing && master) {
       time = master.video.currentTime;
+    }
+    if (playing && (officeMap.open || master)) {
       for (const cid of ids) {
         const t = tiles.get(cid);
         if (
-          t !== master &&
+          (officeMap.open || t !== master) &&
+          t.video.readyState >= 2 &&
           !t.video.seeking &&
           Math.abs(t.video.currentTime - time) > 0.45 &&
           !t.video.ended
@@ -418,7 +454,7 @@ function tick(now) {
           t.video.currentTime = Math.min(time, t.video.duration || time);
       }
     }
-    if (playing && ids.length && ids.every((id) => tiles.get(id).video.ended))
+    if (playing && !officeMap.open && ids.length && ids.every((id) => tiles.get(id).video.ended))
       setPlaying(false);
     if (followed !== null) {
       const cams = activeCameras(state.persons[followed]);
@@ -439,44 +475,64 @@ function tick(now) {
   }
   requestAnimationFrame(tick);
 }
-function message(role, text) {
+function formatMessage(node, html) {
+  if (typeof html !== "string") return;
+  const content = node.querySelector(".messageContent");
+  // The chat API renders Markdown with raw HTML and images disabled.
+  content.innerHTML = html;
+  content.classList.add("formatted");
+  for (const link of content.querySelectorAll("a")) {
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+  }
+}
+function message(role, text, html) {
   const node = el("div", `message ${role}`);
   node.append(
-    el("strong", "", role === "user" ? "You" : "Sensen AI"),
-    document.createTextNode(text),
+    el("strong", "messageAuthor", role === "user" ? "You" : "Sensen AI"),
+    el("div", "messageContent", text),
   );
+  formatMessage(node, html);
   $("messages").append(node);
   $("messages").scrollTop = $("messages").scrollHeight;
   return node;
 }
 async function ask(event) {
   event.preventDefault();
-  const prompt = $("prompt").value.trim();
-  if (!prompt || busy) return;
+  const prompt = $("prompt").value;
+  if (!prompt.trim() || busy) return;
   busy = true;
   $("send").disabled = true;
   $("send").textContent = "Thinking…";
-  message("user", prompt);
+  const userMessage = message("user", prompt);
   $("prompt").value = "";
   try {
-    const result = await api("/api/chat", { prompt }),
-      node = message("ai", result.reply);
+    const result = await api("/api/chat", { prompt, view: { camera: focus, followed, seconds: time } });
+    formatMessage(userMessage, result.prompt_html);
+    const node = message("ai", result.reply, result.reply_html);
     const links = el("div", "toolbar");
+    const seen = new Set();
     for (const m of result.reply.matchAll(
       /\[?Cam\s*(\d+)\s*(?:@|at)\s*(\d+):(\d{2})\]?/gi,
-    ))
+    )) {
+      const camera = String(Number(m[1]));
+      const seconds = Number(m[2]) * 60 + Number(m[3]);
+      const key = `${camera}:${seconds}`;
+      if (!state.cameras[camera] || seen.has(key)) continue;
+      seen.add(key);
       links.append(
         button(`Cam ${m[1]} · ${m[2]}:${m[3]}`, () =>
-          jump(m[1], Number(m[2]) * 60 + Number(m[3])),
+          jump(camera, seconds),
         ),
       );
+    }
     const gids = new Set(
-      [...result.reply.matchAll(/\[?Person\s*(\d+)\]?/gi)].map((m) => m[1]),
+      [...result.reply.matchAll(/\[?Person\s*(\d+)\]?/gi)].map((m) => String(Number(m[1]))),
     );
     for (const gid of gids)
       if (state.persons[gid])
         links.append(button(`Follow ID ${gid}`, () => follow(gid)));
-    node.append(links);
+    if (links.childElementCount) node.append(links);
     for (const evidence of result.evidence || []) {
       node.append(
         el("p", "subtle", `Visual evidence · Person ${evidence.global_id}`),
@@ -492,6 +548,7 @@ async function ask(event) {
       });
       node.append(row);
     }
+    $("messages").scrollTop = $("messages").scrollHeight;
   } catch (e) {
     message("ai", e.message);
   } finally {
@@ -501,21 +558,30 @@ async function ask(event) {
   }
 }
 function openMerge(gid) {
-  mergeSource = gid;
+  editSource = gid;
   $("mergeDescription").textContent =
-    `Move all sightings from Person ${gid} into the selected identity.`;
+    `Move the sightings from Person ${personLabel(gid)} into the selected identity.`;
+  $("mergeError").hidden = true;
   $("mergeTarget").replaceChildren();
   for (const id of Object.keys(state.persons))
     if (id !== gid) {
-      const o = el("option", "", `Person ${id}`);
+      const o = el("option", "", `Person ${personLabel(id)}`);
       o.value = id;
       $("mergeTarget").append(o);
     }
   $("confirmMerge").disabled = !$("mergeTarget").options.length;
   $("mergeDialog").showModal();
 }
+function openDeleteId(gid) {
+  editSource = gid;
+  $("deleteIdDescription").textContent = `Remove Person ${personLabel(gid)} and their sightings from the gallery, map, and footage overlays.`;
+  $("deleteIdError").hidden = true;
+  $("deleteIdDialog").showModal();
+}
 async function load() {
   state = await api("/api/state");
+  $("editOfficeCameras").disabled = Object.keys(state.cameras).length === 0;
+  $("showEveryone").disabled = $("editOfficeCameras").disabled;
   selected = new Set(state.selected);
   duration = Math.max(
     0,
@@ -537,6 +603,7 @@ async function load() {
     label.append(input, document.createTextNode(" " + name(action)));
     $("actionChoices").append(label);
   }
+  if (officeMap.open) showOfficeMap();
 }
 $("play").onclick = () => {
   if (time >= duration) seek(0);
@@ -556,6 +623,21 @@ $("speed").onchange = () => {
   for (const t of tiles.values()) t.video.playbackRate = speed;
 };
 $("stopFollow").onclick = stopFollow;
+$("showEveryone").onclick = () => {
+  if (officeMap.overview) officeMap.setOpen(false);
+  else {
+    stopFollow();
+    showOfficeMap();
+  }
+};
+$("editOfficeCameras").onclick = () => {
+  setPlaying(false);
+  officeEditor.open(state.office_map, state.cameras, focus);
+};
+$("officeMapToggle").onclick = () => {
+  if (officeMap.open) officeMap.setOpen(false);
+  else showOfficeMap();
+};
 $("workspaceTab").onclick = () => {
   $("workspace").hidden = false;
   $("gallery").hidden = true;
@@ -618,31 +700,44 @@ $("clearChat").onclick = async () => {
   }
 };
 $("cancelMerge").onclick = () => $("mergeDialog").close();
-$("confirmMerge").onclick = async () => {
+$("cancelDeleteId").onclick = () => $("deleteIdDialog").close();
+$("confirmMerge").onclick = () => applyIdentityCorrection(true);
+$("confirmDeleteId").onclick = () => applyIdentityCorrection(false);
+for (const [dialog, cancel] of [["mergeDialog", "cancelMerge"], ["deleteIdDialog", "cancelDeleteId"]]) {
+  $(dialog).addEventListener("cancel", (event) => {
+    if ($(cancel).disabled) event.preventDefault();
+  });
+}
+async function applyIdentityCorrection(merge) {
+  const dialog = $(merge ? "mergeDialog" : "deleteIdDialog");
+  const confirm = $(merge ? "confirmMerge" : "confirmDeleteId");
+  const cancel = $(merge ? "cancelMerge" : "cancelDeleteId");
+  const error = $(merge ? "mergeError" : "deleteIdError");
   setPlaying(false);
-  $("confirmMerge").disabled = true;
+  confirm.disabled = cancel.disabled = true;
+  error.hidden = true;
+  let saved = false;
   try {
-    await api("/api/merge", {
-      source: mergeSource,
-      target: $("mergeTarget").value,
-      revision: state.revision,
-    });
-    $("mergeDialog").close();
-    followed = null;
+    const payload = {source: editSource, revision: state.revision};
+    if (merge) payload.target = $("mergeTarget").value;
+    const result = await api(merge ? "/api/merge" : "/api/delete-id", payload);
+    saved = true;
+    dialog.close();
+    stopFollow();
     focus = null;
     chunks.clear();
     $("messages").replaceChildren();
-    $("followBar").hidden = true;
     await load();
-    notice(
-      "Merge saved. Action analysis must be rerun for the updated identities.",
-    );
+    const summary = merge ? `Merged into Person ${personLabel(result.kept_id)}.` : "False ID deleted.";
+    notice([summary, "Remaining IDs renumbered.", result.activity_note].filter(Boolean).join(" "));
   } catch (e) {
-    notice(e.message);
+    error.textContent = e.message;
+    error.hidden = false;
+    notice(saved ? "The edit was saved. Reload review to see the updated IDs." : e.message);
   } finally {
-    $("confirmMerge").disabled = false;
+    confirm.disabled = cancel.disabled = false;
   }
-};
+}
 document.addEventListener("keydown", (e) => {
   if (
     ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(e.target.tagName) ||

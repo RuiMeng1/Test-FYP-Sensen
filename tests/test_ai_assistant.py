@@ -2,18 +2,18 @@
 test_ai_assistant.py — Tests for the OpenAI AI Assistant module.
 """
 
-import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-# Ensure root directory is on python path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from src.ai_assistant import TrackingLogContextBuilder, query_tracking_ai
+from src.ai_assistant import AIAssistant
 
 
 class TestAIAssistant(unittest.TestCase):
     def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
         self.mock_log = {
             "cameras": {
                 "1": {"fps": 25.0, "total_frames": 1000, "video_file": "cam1.mp4"},
@@ -48,18 +48,18 @@ class TestAIAssistant(unittest.TestCase):
                 }
             },
         }
+        self.assistant = AIAssistant(self.mock_log, Path(self.folder.name))
 
     def test_context_builder(self):
-        context = TrackingLogContextBuilder.build_system_context(self.mock_log)
+        context = self.assistant.build_system_context()
         self.assertIn("Camera 1: File=cam1.mp4", context)
-        self.assertIn("Person Global ID: 0", context)
-        self.assertIn("Wearing a red jacket", context)
-        self.assertIn("0:04 -> 0:08", context)
+        self.assertIn("[Person 0]", context)
+        self.assertIn("0:04 to 0:08", context)
 
     def test_query_ai_without_key(self):
-        # Without valid OpenAI API key, should return helpful message
-        res = query_tracking_ai("Where was Person 0?", self.mock_log, api_key="")
-        self.assertIn("OpenAI API Key Missing", res)
+        with patch.object(self.assistant, 'reload_config'), patch.object(self.assistant, 'api_key', ''):
+            reply = self.assistant.ask("Where was Person 0?")
+        self.assertIn("OpenAI API Key Not Found or Not Configured", reply)
 
 
 if __name__ == "__main__":

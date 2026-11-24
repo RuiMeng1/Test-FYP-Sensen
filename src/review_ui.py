@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import re
 import time
 import tkinter as tk
 from datetime import datetime
@@ -32,6 +33,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 from src.ai_assistant import AIAssistant, parse_camera_timestamp, parse_person_ids
 from src.action_events import timestamp
 from src.action_labels import LABELS, display_name, visible_actions
+from src.identity_review import save_identity_correction
 
 # Path to application logo asset
 _LOGO_PATH = Path(__file__).parent / "assets" / "sensen_logo.png"
@@ -153,7 +155,7 @@ class ReviewUI:
 
         # Normal playback uses the annotated videos. Raw frames only need to be
         # redrawn while filtering to one person or after an in-app ID merge.
-        self._requires_dynamic_overlays = False
+        self._requires_dynamic_overlays = bool(tracking_data.get('identities_reviewed'))
 
         # View state
         self._main_section = "video"              # "video" or "gallery"
@@ -253,7 +255,7 @@ class ReviewUI:
                 return self._read_capture_frame(cap, frame_idx)
 
         # Filtering to one person and post-merge labels require raw frames.
-        if raw_cap is not None and self.detections:
+        if raw_cap is not None and (self.detections or self._requires_dynamic_overlays):
             frame = self._read_capture_frame(raw_cap, frame_idx)
             if frame is not None:
                 frame_copy = frame.copy()
@@ -266,6 +268,9 @@ class ReviewUI:
                     self._draw_detection_box(frame_copy, d["gid"], d["bbox"])
                 return frame_copy
 
+        # Corrected IDs can only be displayed over clean footage.
+        if self._requires_dynamic_overlays:
+            return None
         # Fallback to pre-rendered output video
         cap = self._caps.get(cam_id)
         if cap is None:
@@ -289,11 +294,14 @@ class ReviewUI:
             (0, 140, 255), (180, 220, 50), (220, 20, 60),
         ]
         color = palette[gid % len(palette)] if gid >= 0 else (140, 140, 140)
+        hex_color = self.persons.get(gid, {}).get('color_hex', '')
+        if re.fullmatch(r'#[0-9a-fA-F]{6}', hex_color or ''):
+            color = tuple(int(hex_color[offset:offset+2], 16) for offset in (5, 3, 1))
         x1, y1, x2, y2 = bbox
 
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
 
-        id_text = f"ID:{gid:03d}"
+        id_text = f"ID:{gid:03d}" if gid >= 0 else "Unknown"
         id_font = cv2.FONT_HERSHEY_DUPLEX
         id_scale = 1.4
         id_thick = 2
@@ -1669,8 +1677,8 @@ class ReviewUI:
         msg = (
             f"Are you sure you want to merge ID:{source_gid:03d} into ID:{target_gid:03d}?\n\n"
             f"• ID:{source_gid:03d} ({src_dets} detections) will be combined into ID:{target_gid:03d} ({tgt_dets} detections).\n"
-            f"• All video bounding boxes, appearances, and timelines will be reassigned.\n"
-            f"• Changes will be saved permanently to tracking_log.json."
+            "• The remaining IDs will be renumbered to close the gap.\n"
+            "• A backup of the tracking log will be kept."
         )
 
         confirm = messagebox.askyesno(
@@ -1683,86 +1691,24 @@ class ReviewUI:
             self._execute_merge(source_gid, target_gid)
 
     def _execute_merge(self, source_gid: int, target_gid: int) -> None:
-        """Execute the merge of source_gid into target_gid across data structures and disk."""
-        print(f"[ReviewUI] Merging Person ID:{source_gid:03d} → ID:{target_gid:03d} …")
-
-        source_person = self.persons.get(source_gid)
-        target_person = self.persons.get(target_gid)
-
-        if not source_person or not target_person:
-            messagebox.showerror("Merge Error", "One of the selected person records was not found.", parent=self.root)
-            self._cancel_merge()
+        if self._caps.keys() - self._raw_caps.keys():
+            messagebox.showerror("Merge Error", "Open review with the original videos to edit IDs.", parent=self.root)
             return
-
-        # 1. Merge appearances
-        target_apps = target_person.get("appearances", [])
-        source_apps = source_person.get("appearances", [])
-        combined_apps = target_apps + source_apps
-        combined_apps.sort(key=lambda a: (a.get("camera_id", 0), a.get("first_frame", 0)))
-        target_person["appearances"] = combined_apps
-
-        # 2. Merge cameras seen
-        cams_seen = set(target_person.get("cameras_seen", [])) | set(source_person.get("cameras_seen", []))
-        target_person["cameras_seen"] = sorted(list(cams_seen))
-
-        # 3. Sum total detections
-        target_person["total_detections"] = (
-            target_person.get("total_detections", 0) + source_person.get("total_detections", 0)
-        )
-
-        # 4. Combine up to three visual-profile thumbnails, preserving the
-        # target identity's images first and removing exact duplicates.
-        target_thumbnails = target_person.get("thumbnails_b64") or [
-            target_person.get("thumbnail_b64")
-        ]
-        source_thumbnails = source_person.get("thumbnails_b64") or [
-            source_person.get("thumbnail_b64")
-        ]
-        combined_thumbnails = []
-        for thumbnail in target_thumbnails + source_thumbnails:
-            if thumbnail and thumbnail not in combined_thumbnails:
-                combined_thumbnails.append(thumbnail)
-            if len(combined_thumbnails) == 3:
-                break
-        target_person["thumbnails_b64"] = combined_thumbnails
-        target_person["thumbnail_b64"] = (
-            combined_thumbnails[0] if combined_thumbnails else None
-        )
-
-        # 5. Update per-frame detection boxes in memory
-        for cam_id_str, frames_map in self.detections.items():
-            for frame_str, det_list in frames_map.items():
-                for det in det_list:
-                    if det.get("gid") == source_gid or det.get("global_id") == source_gid:
-                        det["gid"] = target_gid
-                        det["global_id"] = target_gid
-
-        # 6. Remove source person
-        del self.persons[source_gid]
-        if str(source_gid) in self.tracking_data.get("persons", {}):
-            del self.tracking_data["persons"][str(source_gid)]
-
-        # 7. Update tracking_data dictionary
-        self.tracking_data["persons"][str(target_gid)] = target_person
-        self.tracking_data["detections"] = self.detections
-        self._requires_dynamic_overlays = True
-        # A merge changes identity attribution: invalidate action suggestions
-        # until the offline analysis is rerun against the edited tracking log.
-        self.ai_assistant.action_data = {
-            'events': [], 'status': 'Action results invalidated by an ID merge. Rerun action analysis.'
-        }
-        self.ai_assistant.clear_history()
-
-        # 8. Save updated log to JSON file
-        log_path = self.output_dir / "tracking_log.json"
         try:
-            with open(log_path, "w", encoding="utf-8") as f:
-                json.dump(self.tracking_data, f, indent=2)
-            print(f"[ReviewUI] Saved updated tracking log to {log_path}")
-        except Exception as e:
-            print(f"[ReviewUI] Error saving tracking log: {e}")
-
-        # Reset merge state
+            updated, remapped, activity_note = save_identity_correction(
+                self.output_dir, self.tracking_data, source_gid, target_gid)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Merge Error", str(exc), parent=self.root)
+            return
+        self.tracking_data.clear()
+        self.tracking_data.update(updated)
+        self.persons = {int(gid): person for gid, person in updated['persons'].items()}
+        self.detections = updated.get('detections', {})
+        self._requires_dynamic_overlays = True
+        followed = target_gid if self._tracked_gid == source_gid else self._tracked_gid
+        self._tracked_gid = remapped.get(followed)
+        self.ai_assistant.refresh_reviewed_identities(remapped)
+        self._last_active_signature = None
         self._merge_source_gid = None
 
         # Rebuild UI elements
@@ -1776,7 +1722,7 @@ class ReviewUI:
         # Feedback Toast
         messagebox.showinfo(
             "Merge Successful",
-            f"✓ Successfully merged Person ID:{source_gid:03d} into ID:{target_gid:03d}!\nUpdated data saved to tracking_log.json.",
+            f"Merged into Person {remapped[target_gid]:03d}. Remaining IDs renumbered.\n{activity_note}",
             parent=self.root
         )
 
@@ -2351,7 +2297,7 @@ if __name__ == "__main__":
     log_path = OUTPUT_DIR / "tracking_log.json"
     if not log_path.exists():
         print(f"[ReviewUI] No tracking log found at {log_path}")
-        print(f"           Run pipeline first: python -m src.main")
+        print("           Run pipeline first: python -m src.main --all-id-cameras")
         exit(1)
 
     print(f"[ReviewUI] Loading tracking log from {log_path} …")
