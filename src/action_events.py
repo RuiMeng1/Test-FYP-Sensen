@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+from src.action_labels import LABELS
 
 
 def fingerprint(data):
@@ -23,15 +24,17 @@ def load_actions(data, output_dir):
         result = json.loads(path.read_text())
         if not isinstance(result, dict):
             raise ValueError('invalid sidecar')
-        if result.get('schema_version') != 1 or result.get('tracking_fingerprint') != fingerprint(data):
+        if result.get('schema_version') != 2 or result.get('tracking_fingerprint') != fingerprint(data):
             raise ValueError('tracking data changed')
+        if set(result.get('supported_actions', [])) != set(LABELS.values()):
+            raise ValueError('office activity labels changed')
         for source in result['sources']:
             if source_signature(source['path']) != source:
                 raise ValueError('source footage changed')
         if not isinstance(result['events'], list):
             raise ValueError('invalid events')
         for event in result['events']:
-            if not isinstance(event, dict) or not isinstance(event['action'], str):
+            if not isinstance(event, dict) or event['action'] not in LABELS.values():
                 raise ValueError('invalid event')
             if str(event['person_id']) not in {str(gid) for gid in data.get('persons', {})}:
                 raise ValueError('unknown person')
@@ -46,7 +49,7 @@ def load_actions(data, output_dir):
             raise ValueError('invalid status')
         return result
     except (OSError, ValueError, KeyError, TypeError):
-        return {'events': [], 'status': 'Action results unavailable or stale. Run action analysis again.'}
+        return {'events': [], 'status': 'Office activity results unavailable or stale. Run action analysis again.'}
 
 
 def timestamp(seconds):

@@ -73,13 +73,23 @@ def parse_args() -> argparse.Namespace:
         help="Override compute device (default: auto-detected).",
     )
     parser.add_argument(
+        "--detector-workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Maximum concurrent YOLO detections (default: 2 on CPU, 1 on GPU).",
+    )
+    parser.add_argument(
         "--port",
         type=int,
         default=5001,
         metavar="PORT",
         help="Port for the web dashboard (default: 5000).",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.detector_workers is not None and args.detector_workers < 1:
+        parser.error("--detector-workers must be at least 1")
+    return args
 
 
 def get_video_paths(args: argparse.Namespace) -> List[Path]:

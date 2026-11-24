@@ -3,16 +3,15 @@ pipeline.py — Single-camera processing worker.
 
 Each CameraWorker runs in its own thread:
   1. Reads frames from the video file
-  2. Sends the frame to the shared DetectionDispatcher (round-robin, synchronized)
+  2. Sends the frame to the shared DetectionDispatcher (bounded parallel inference)
   3. Every reid_interval frames: extracts TransReID embeddings for all detected persons
   4. Queries the shared GlobalGallery for global IDs
   5. Annotates frames with large, visible bounding boxes and global IDs
   6. Pushes annotated frames to a shared display queue (for live preview)
   7. Writes annotated frames to an output .mp4 file
 
-Synchronization note:
-  Detection now goes through DetectionDispatcher which processes cameras in
-  round-robin order, keeping all cameras at the same frame position in their videos.
+The dispatcher serves one pending frame per camera in each round, with up to
+two CPU detections at a time by default.
 """
 
 from __future__ import annotations
@@ -81,7 +80,7 @@ class CameraWorker:
     video_path    : Path to the .mp4 file.
     camera_id     : Integer camera label (1-based, for display).
     cam_idx       : 0-based index into the dispatcher's camera slots.
-    dispatcher    : Shared DetectionDispatcher (round-robin single YOLO).
+    dispatcher    : Shared DetectionDispatcher (bounded parallel YOLO).
     reid_model    : Shared TransReID encoder (thread-safe via internal lock).
     gallery       : Shared GlobalGallery (thread-safe).
     display_queue : Optional queue for pushing annotated frames to the display loop.
@@ -113,6 +112,7 @@ class CameraWorker:
         self.output_path   = OUTPUT_DIR / f"{video_path.stem}_tracked.mp4"
         self.is_done       = False
         self.has_started   = False
+        self.error: Optional[Exception] = None
         self.fps_stat      = 0.0
         self.total_frames  = 0
         self.frame_idx     = 0
@@ -129,9 +129,22 @@ class CameraWorker:
 
     def start(self) -> None:
         self._thread = threading.Thread(
-            target=self._run, name=f"Cam{self.camera_id}", daemon=True
+            target=self._run_guarded, name=f"Cam{self.camera_id}", daemon=True
         )
         self._thread.start()
+
+    def _run_guarded(self) -> None:
+        try:
+            self._run()
+        except Exception as exc:
+            self.error = exc
+            print(f"[Cam{self.camera_id}] ERROR: {exc}")
+        finally:
+            for resource in (getattr(self, '_capture', None), getattr(self, '_writer', None)):
+                if resource is not None:
+                    resource.release()
+            self.dispatcher.camera_done(self.cam_idx)
+            self.is_done = True
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -150,11 +163,9 @@ class CameraWorker:
 
     def _run(self) -> None:
         cap = cv2.VideoCapture(str(self.video_path))
+        self._capture = cap
         if not cap.isOpened():
-            print(f"[Cam{self.camera_id}] ERROR: Cannot open {self.video_path}")
-            self.has_started = True
-            self.is_done = True
-            return
+            raise RuntimeError(f"Cannot open {self.video_path}")
 
         self.has_started = True
 
@@ -183,6 +194,7 @@ class CameraWorker:
             occlusion_logger = None
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(str(self.output_path), fourcc, src_fps, (width, height))
+        self._writer = writer
 
         t_start = time.time()
         print(
@@ -195,7 +207,7 @@ class CameraWorker:
             if not ret:
                 break
 
-            # ── Detection via shared dispatcher (round-robin, synchronized) ──
+            # ── Detection via shared bounded dispatcher ──
             detections = self.dispatcher.detect(self.cam_idx, frame, self.camera_id)
 
             # ── Normalise Colour ──

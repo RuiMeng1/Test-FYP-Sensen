@@ -1,2 +1,2 @@
-# Optional offline action analysis; normal review does not import this package.
-pytorchvideo==0.1.5
+# Office activity analysis uses ultralytics and OpenCV from requirements.txt.
+# No extra Python packages are required.

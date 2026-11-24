@@ -96,7 +96,9 @@ def main() -> None:
         n_cameras=n_cameras,
         device=device,
         model_name=YOLO_MODEL_NAME,
+        max_workers=args.detector_workers,
     )
+    print(f"[Setup] Running {dispatcher.n_workers} YOLO detection worker(s)")
 
     print("[Setup] Loading TransReID encoder …")
     reid_model = TransReIDEncoder(weights_path=TRANSREID_WEIGHTS, device=reid_dev)
@@ -135,14 +137,16 @@ def main() -> None:
         w.start()
 
     # ── Wait for completion ───────────────────────────────────────────────────
+    interrupted = False
     try:
         while True:
             all_started = all(w.has_started for w in workers)
             all_done    = all_started and all(w.is_done for w in workers)
-            if all_done:
+            if all_done or any(w.error for w in workers):
                 break
             time.sleep(0.1)
     except KeyboardInterrupt:
+        interrupted = True
         print("\n[Main] Keyboard interrupt — stopping workers …")
         for w in workers:
             w.stop()
@@ -151,6 +155,15 @@ def main() -> None:
     dispatcher.stop()
     for w in workers:
         w.join(timeout=10)
+
+    if interrupted:
+        print("[Main] Processing interrupted; tracking log was not saved")
+        return
+
+    failures = [(w.camera_id, w.error) for w in workers if w.error is not None]
+    if failures:
+        cameras = ", ".join(str(camera_id) for camera_id, _ in failures)
+        raise RuntimeError(f"Processing failed on camera(s) {cameras}; tracking log was not saved") from failures[0][1]
 
     elapsed = time.time() - t_start
 

@@ -298,7 +298,7 @@ function buildPeople() {
         `${(p.appearances || []).reduce((s, a) => s + a.duration_seconds, 0).toFixed(1)} seconds visible`,
       ),
       el("p", "", `Cameras ${(p.cameras_seen || []).join(", ")}`),
-      el("p", "subtle", `${p.total_detections || 0} detections`),
+      el("p", "subtle", `${state.person_counts?.[gid] ?? p.total_detections ?? 0} detections`),
     );
     const controls = el("div", "toolbar");
     controls.append(

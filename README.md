@@ -49,7 +49,7 @@ python -m src.main
 ```
 
 The pipeline runs in **two phases**:
-1. **Processing** — All camera feeds are processed headlessly across worker threads at maximum speed. Annotated output videos and `tracking_log.json` are saved to `output/`.
+1. **Processing** — Camera feeds are processed headlessly across worker threads. YOLO detection runs on two cameras concurrently by default on CPU; GPU runs stay serial by default. Annotated output videos and `tracking_log.json` are saved to `output/`.
 2. **Review** — An interactive review dashboard opens automatically for post-processing review.
 
 ---
@@ -92,6 +92,10 @@ python -m src.main --review-only
 
 # Performance tweak: extract Re-ID features less often (e.g., every 10 frames)
 python -m src.main --reid-interval 10
+
+# Compare serial detection with the CPU default of two concurrent detections
+python -m src.main --detector-workers 1
+python -m src.main --detector-workers 2
 
 # Force a specific compute device (auto-detects by default)
 python -m src.main --device cpu
@@ -162,6 +166,7 @@ Test-FYP-Sensen/
 │   └── pipeline_settings.json  # Saved from scripts/configure.py
 ├── data/                       # Input video files (*.mp4)
 ├── docs/
+│   ├── action-analysis.md      # Office activity suggestions and limitations
 │   └── partial-occlusion.md    # Documentation for occlusion handling logic
 ├── models/
 │   └── personvit_reid/         # Bundled PersonViT-ReID model weights & config
@@ -184,6 +189,7 @@ Test-FYP-Sensen/
 │   ├── gallery.py              # Cross-camera global ID gallery & exemplar banks
 │   ├── main.py                 # Pipeline entry point
 │   ├── occlusion.py            # Partial occlusion detection & size history tracking
+│   ├── office_vision.py        # Pose and phone evidence for office activities
 │   ├── pipeline.py             # Per-camera worker thread logic
 │   ├── reid_model.py           # PersonViT feature extractor with DINOv2 fallback
 │   ├── review_ui.py            # Post-processing desktop review UI (Tkinter)
@@ -195,3 +201,12 @@ Test-FYP-Sensen/
 ├── requirements.txt            # Python dependencies
 └── README.md                   # Project documentation
 ```
+
+## Optional office activity analysis
+
+After tracking, run `python -m src.action_analysis --output-dir output` and restart
+review. The offline pass suggests sitting, standing, walking, and possible phone
+use from pose, tracked movement, and a visible phone near a hand. It samples once
+per second by default and stores unreviewed intervals in `output/action_events.json`.
+The first run downloads the official YOLOv8 nano pose checkpoint. See
+[`docs/action-analysis.md`](docs/action-analysis.md) for options and limitations.

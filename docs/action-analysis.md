@@ -1,58 +1,59 @@
-# Optional SlowFast action analysis
+# Office activity analysis
 
-Normal tracking and review commands remain unchanged. Run action analysis after
-processing completes and close/reopen review to load its results.
+Run this optional pass after normal tracking. It reads original footage and the
+saved tracking log, then writes `output/action_events.json` for both review UIs
+and the assistant. Restart the review server or desktop UI after a run.
 
 ```sh
-pip install -r requirements-actions.txt
-python -m src.action_analysis --output-dir output --camera 1 --start 5 --end 10
-python -m src.main --review-only
+python -m src.action_analysis --output-dir output
+python -m src.action_analysis --output-dir output --camera 6 --start 5 --end 30
 ```
 
-Omit camera/start/end for all footage. `--data-dir` selects the directory containing
-the original input videos. The filenames must match the tracking run. A limited run
-replaces the previous action sidecar with only its new coverage.
+The default samples one frame per second. `--step 0.5` samples twice as often;
+`--walk-speed 0.25` sets the minimum ground-point travel, measured in person
+heights per second. Use `--data-dir` if the original videos are elsewhere.
+`--device cpu` is the portable default; `mps` and `cuda` are optional.
+On CPU, two cameras are analyzed concurrently by default, with separate models
+per worker. Use `--workers 1` to compare serial processing or `--workers 4` to
+benchmark more parallel work; GPU runs default to one worker.
+Object detection uses `--object-size 1920` by default to retain small phones in
+wide CCTV frames; lower it for faster analysis if phone recall is less important.
 
-The first run downloads the official PyTorchVideo SlowFast R50 AVA checkpoint.
-CPU is the portable default (including Macs); CUDA is optional. MPS is not assumed
-compatible. Expect extra offline processing time; inference never runs in review.
+The pass uses the existing COCO `yolov8n.pt` object model and the official
+`yolov8n-pose.pt` checkpoint. Ultralytics downloads the pose checkpoint on first
+use if it is absent. You can supply local checkpoint paths with `--pose-model`
+and `--object-model`. No OpenAI call or extra video copy is made.
 
-The pass uses raw RGB clips and saved boxes at the reference frame, 32 temporal
-samples, 256-pixel short side, normalization mean 0.45/std 0.225, and slow/fast
-ratio 4. The clip spans approximately 2.13 seconds. Scores are sampled once per
-second by default; tune `--step` and `--threshold` (default 0.6) on labelled footage.
+Events are **unreviewed suggestions**:
 
-All 60 evaluated AVA v2.2 labels are enabled (see `src/action_labels.py`), including
-running, phone use, and fighting/hitting. These are unreviewed predictions. Actions require two
-adjacent positive samples; possible falls preserve single samples. Intervals report
-sample times, not exact movement boundaries. Sitting does not mean sitting down;
-standing does not establish a stand-up transition. Scores are not probabilities
-of correctness. Falls need human verification; automatic confirmation is absent.
+- **Sitting / standing:** visible shoulder, hip, knee and ankle geometry in a
+  matched pose. Sitting also requires a detected chair or couch under the hip
+  to avoid logging crouching on the floor as office seating. If the joints or
+  seat are hidden or ambiguous, no posture is reported.
+- **Walking:** a person classified as standing whose tracked ground point moves
+  at least the configured speed across adjacent samples in one fixed camera.
+- **Possible phone use:** the COCO object model detects a phone near a visible
+  wrist inside the tracked person's box. It does not establish that the person
+  is interacting with the phone.
 
-Expand a person's logger card to see clickable suggestions. The assistant receives
-the events and analyzed camera/time coverage. No extra vision API calls are used.
-Use **Action display settings…** above the camera views to toggle multiple overlay
-labels, or select All/None. Apply saves the selection in
-`output/action_display_settings.json`. Filtering affects only footage overlays;
-all retained events stay in the logger and assistant context. Overlays use current
-saved person boxes during each event interval; ambiguous or missing boxes suppress
-the label. Existing five-action results must be regenerated to include new classes.
-Data is stored atomically in `output/action_events.json`; the tracking log and
-rendered videos are untouched. Old results are rejected if the tracking JSON or
-source video size/modification time/path changes. ID merges invalidate the results.
-The sidecar keeps the checkpoint identity, threshold, sampling interval, supporting
-frame and box, and skipped-window counts. Duplicate global IDs at the reference
-frame are skipped rather than assigned an action.
+An interval needs at least two consecutive positive samples. A missed frame or
+uncertain pose creates a gap; the system does not fill it. The first movement
+sample has no prior point, so walking starts only after a comparison. Sitting
+and standing are postures; they do not establish the exact moment of a
+sit-down or stand-up transition. Scores are model and landmark confidence
+indicators, not calibrated probabilities of behavior.
 
-Limitations: identity swaps across different frames can still misattribute actions.
-The current detector's aspect-ratio and minimum-height filters can remove seated
-or fallen people, so absent suggestions are not evidence that no event occurred.
-Only saved boxes are analyzed. Heavy occlusion and missing detections reduce coverage.
-No fine-tuning or accuracy claims are included in this prototype.
+Small or hidden phones, desk occlusion, steep camera angles, camera movement,
+and identity swaps can cause missed or incorrect events. Tune and validate on
+labelled footage from the actual cameras before relying on counts or duration.
+The existing person tracker can exclude seated people behind desks. This pass
+cannot attribute an event to a person who is absent from the tracking log; a
+seated worker hidden by a chair in the sample workspace footage was missed by
+the stock YOLO detectors tested here.
+Absent events do not prove inactivity. The saved sidecar is invalidated if the
+tracking log or source footage changes; a limited run replaces its earlier
+coverage. ID merges also invalidate it. Existing tracking videos are untouched.
 
-Sources:
-- https://pytorchvideo.org/docs/tutorial_torchhub_detection_inference
-- https://dl.fbaipublicfiles.com/pytorchvideo/data/class_names/ava_action_list.pbtxt
-- https://github.com/facebookresearch/pytorchvideo/blob/main/pytorchvideo/models/hub/slowfast.py
-
-Checks: `python -m unittest discover -s tests -p 'test_action_events.py'`.
+Sources: [Ultralytics YOLOv8 pose models](https://docs.ultralytics.com/models/yolov8/),
+[pose keypoint format](https://docs.ultralytics.com/tasks/pose/), and
+[COCO phone class](https://docs.ultralytics.com/datasets/detect/coco/).

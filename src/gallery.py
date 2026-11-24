@@ -514,7 +514,7 @@ class GlobalGallery:
                 card = f"""
                 <div class='card'>
                     <h2>Person ID: {entry.global_id}</h2>
-                    <div class='stats'>Total Detections: {entry.hit_count}</div>
+                    <div class='stats'>Appearance updates: {entry.hit_count}</div>
                     <div class='badges'>{cam_badges}</div>
                     <div class='thumbs'>{imgs_html}</div>
                 </div>

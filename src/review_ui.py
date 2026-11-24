@@ -2203,7 +2203,7 @@ class ReviewUI:
                  bg=BG_SECONDARY, fg=TEXT_SECONDARY).pack(padx=12, pady=(0, 8))
         supported = set(self.ai_assistant.action_data.get('supported_actions', []))
         if supported != set(LABELS.values()):
-            tk.Label(window, text='Rerun action analysis to generate all 60 action types.',
+            tk.Label(window, text='Rerun office activity analysis to generate the current labels.',
                      bg=BG_SECONDARY, fg=ACCENT_YELLOW).pack(pady=4)
         options = sorted(LABELS.values(), key=display_name)
         container = tk.Frame(window, bg=BG_SECONDARY)

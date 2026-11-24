@@ -39,6 +39,8 @@ after files move. Restart the server after new tracking or action analysis.
 
 Videos use native HTML5 decoding and HTTP range requests. The server does not stream
 per-frame JPEGs. Canvas overlays use cached ten-second chunks of detection metadata.
+The overlay interpolates boxes across gaps of at most eight frames (about 0.32 seconds
+at 25 fps) when the same unique ID is present on both sides; longer gaps remain blank.
 Hidden cameras pause. Logger nodes persist while visibility badges update at 5 Hz.
 Grid videos correct drift only above 450 ms rather than seeking every frame.
 Smoothness still depends on camera count, hardware decoding, and browser support;

@@ -27,6 +27,17 @@ from typing import Dict, List, Optional, Set, Tuple
 GAP_THRESHOLD = 30
 
 
+def saved_detection_counts(detections: dict) -> Dict[int, int]:
+    """Count visible saved boxes per global ID, across all cameras and frames."""
+    counts: Dict[int, int] = {}
+    for frames in detections.values():
+        for boxes in frames.values():
+            for box in boxes:
+                gid = int(box["gid"])
+                counts[gid] = counts.get(gid, 0) + 1
+    return counts
+
+
 @dataclass
 class Appearance:
     """A continuous stretch of visibility on one camera."""
@@ -206,6 +217,7 @@ class TrackingLog:
 
             # Also include gallery entries that might not have appearances
             snapshot = gallery.get_all_entries_snapshot()
+            detection_counts = saved_detection_counts(self._detections)
             for entry in snapshot:
                 all_gids.add(entry["global_id"])
 
@@ -216,16 +228,16 @@ class TrackingLog:
                 )
 
                 appearances = self._appearances.get(gid, [])
-                total_detections = sum(
-                    a.last_frame - a.first_frame + 1 for a in appearances
-                )
+                # Count saved boxes, not Re-ID/gallery updates. A track may be
+                # visible on frames where no appearance extraction is due.
+                total_detections = detection_counts.get(gid, 0)
 
                 persons[str(gid)] = {
                     "global_id": gid,
                     "color_hex": get_color_hex(gid),
                     "thumbnail_b64": gallery_entry["thumbnail_b64"] if gallery_entry else None,
                     "thumbnails_b64": gallery_entry.get("thumbnails_b64", []) if gallery_entry else [],
-                    "total_detections": gallery_entry["hit_count"] if gallery_entry else total_detections,
+                    "total_detections": total_detections,
                     "cameras_seen": gallery_entry["cameras_seen"] if gallery_entry else sorted(set(a.camera_id for a in appearances)),
                     "appearances": [a.to_dict() for a in appearances],
                     "visual_attributes": None,

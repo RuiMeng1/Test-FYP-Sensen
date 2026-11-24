@@ -312,9 +312,10 @@ class AIAssistant:
         ]
         lines.append('Action analysis status: ' + self.action_data['status'])
         lines.append('Action coverage: ' + json.dumps(self.action_data.get('coverage', [])))
-        lines.append('Action events are model suggestions, not verified facts. Scores are not calibrated probabilities. '
-                     'Sitting/standing are postures, not proof of a sit-down/stand-up transition. '
-                     'Possible falls require human review. Missing events do not establish that nothing happened. '
+        lines.append('Office activity events are unreviewed suggestions, not verified facts. Scores are not calibrated probabilities. '
+                     'Sitting and standing are sampled postures, not proof of a sit-down or stand-up transition. '
+                     'Possible phone use means a visible phone was near a detected hand; it does not prove interaction. '
+                     'Walking is inferred from tracked movement in a fixed camera. Missing events do not establish inactivity. '
                      'Only answer action questions within the listed coverage; use camera/time citations.')
 
         for cid, cinfo in sorted(cameras.items(), key=lambda x: int(x[0])):

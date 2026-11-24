@@ -4,6 +4,7 @@ import copy
 import hashlib
 import io
 import json
+import math
 from pathlib import Path
 import secrets
 import threading
@@ -14,6 +15,7 @@ from fractions import Fraction
 from flask import Flask, abort, jsonify, request, send_file
 from src.action_events import fingerprint, load_actions
 from src.action_labels import LABELS
+from src.tracking_log import saved_detection_counts
 from src.ai_assistant import AIAssistant
 
 
@@ -22,6 +24,44 @@ def atomic_json(path, data):
         json.dump(data, handle, indent=2)
         temporary = Path(handle.name)
     temporary.replace(path)
+
+
+def overlay_boxes(frames, start, end, fps):
+    """Bridge brief gaps only when the same unique ID exists on both sides."""
+    max_gap = max(1, min(8, round(fps * .32)))
+    result = {str(frame): [dict(box) for box in frames[str(frame)]]
+              for frame in range(start, end + 1) if str(frame) in frames}
+    by_id = {}
+    for frame in range(max(0, start - max_gap - 1), end + max_gap + 2):
+        boxes = frames.get(str(frame), [])
+        counts = {}
+        for box in boxes:
+            counts[box['gid']] = counts.get(box['gid'], 0) + 1
+        for box in boxes:
+            if counts[box['gid']] == 1:
+                by_id.setdefault(box['gid'], []).append((frame, box['bbox']))
+    for gid, observations in by_id.items():
+        for (before, old), (after, new) in zip(observations, observations[1:]):
+            gap = after - before - 1
+            if gap < 1 or gap > max_gap:
+                continue
+            if any(sum(box['gid'] == gid for box in frames.get(str(frame), [])) > 1
+                   for frame in range(before + 1, after)):
+                continue
+            height = max(old[3] - old[1], new[3] - new[1], 1)
+            travel = math.hypot((new[0] + new[2] - old[0] - old[2]) / 2,
+                                (new[1] + new[3] - old[1] - old[3]) / 2)
+            if travel > 1.5 * height:
+                continue
+            for frame in range(max(start, before + 1), min(end, after - 1) + 1):
+                current = result.setdefault(str(frame), [])
+                if any(box['gid'] == gid for box in current):
+                    continue
+                blend = (frame - before) / (after - before)
+                current.append({'gid': gid,
+                                'bbox': [round(a + (b - a) * blend) for a, b in zip(old, new)],
+                                'interpolated': True})
+    return result
 
 
 def prepare_video(source, cache, fps=None):
@@ -130,9 +170,11 @@ def create_app(output_dir, data_dir, prepare=True):
                 settings = json.loads((output/'action_display_settings.json').read_text())['actions']
             except (OSError, ValueError, KeyError):
                 pass
+            settings = [action for action in settings if action in LABELS.values()] if isinstance(settings, list) else list(LABELS.values())
             cameras = {cid: {**meta, **{k: v for k, v in media[cid].items() if k != 'path'}}
                        for cid, meta in data['cameras'].items()}
             return jsonify(token=token, revision=revision, cameras=cameras, persons=data['persons'],
+                           person_counts=saved_detection_counts(data.get('detections', {})),
                            actions=assistant.action_data, labels=list(LABELS.values()), selected=settings)
 
     @app.get('/video/<int:camera_id>')
@@ -151,8 +193,8 @@ def create_app(output_dir, data_dir, prepare=True):
                 abort(404)
             fps = data['cameras'][cid]['fps']
             frames = data.get('detections', {}).get(cid, {})
-            return jsonify({str(f): frames[str(f)] for f in range(int(chunk*10*fps), int((chunk+1)*10*fps)+1)
-                            if str(f) in frames})
+            start, end = int(chunk * 10 * fps), int((chunk + 1) * 10 * fps) + 1
+            return jsonify(overlay_boxes(frames, start, end, fps))
 
     @app.post('/api/settings')
     def settings():

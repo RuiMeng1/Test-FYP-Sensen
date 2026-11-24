@@ -1,7 +1,7 @@
 """
 detector.py — YOLOv8 person detector with ByteTrack for per-camera local tracking.
 
-Each CameraWorker creates its own PersonDetector instance because
+Each camera has its own PersonDetector instance because
 YOLO's .track(persist=True) maintains internal tracker state per model instance.
 Sharing one instance across threads would mix up tracker IDs between cameras.
 """

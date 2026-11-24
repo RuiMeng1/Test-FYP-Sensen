@@ -7,10 +7,23 @@ from unittest.mock import patch
 
 import cv2
 import numpy as np
-from src.web_review import create_app, prepare_video
+from src.web_review import create_app, prepare_video, overlay_boxes
 
 
 class WebReviewTest(unittest.TestCase):
+    def test_overlay_bridges_only_short_unambiguous_gaps(self):
+        frames = {
+            '0': [{'gid': 3, 'bbox': [0, 0, 20, 40]}],
+            '3': [{'gid': 3, 'bbox': [6, 0, 26, 40]}],
+            '15': [{'gid': 3, 'bbox': [30, 0, 50, 40]}],
+        }
+        boxes = overlay_boxes(frames, 0, 15, 25)
+        self.assertEqual(boxes['1'][0], {'gid': 3, 'bbox': [2, 0, 22, 40], 'interpolated': True})
+        self.assertEqual(boxes['2'][0]['bbox'], [4, 0, 24, 40])
+        self.assertNotIn('4', boxes)
+        frames['1'] = [{'gid': 3, 'bbox': [1, 0, 21, 40]}, {'gid': 3, 'bbox': [2, 0, 22, 40]}]
+        self.assertNotIn('2', overlay_boxes(frames, 0, 3, 25))
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.root = Path(self.directory.name)
@@ -52,8 +65,8 @@ class WebReviewTest(unittest.TestCase):
         backups = list(self.root.glob('tracking_log.before-merge-*.json'))
         self.assertEqual(json.loads(backups[0].read_text()),self.data)
         self.assertEqual(self.client.post('/api/merge',json=body,headers=self.headers).status_code,409)
-        self.assertEqual(self.client.post('/api/settings',json={'actions':['running']},headers=self.headers).status_code,200)
-        self.assertEqual(self.client.get('/api/state').json['selected'],['running'])
+        self.assertEqual(self.client.post('/api/settings',json={'actions':['walking']},headers=self.headers).status_code,200)
+        self.assertEqual(self.client.get('/api/state').json['selected'],['walking'])
 
     def test_chat_and_pdf(self):
         with patch('src.ai_assistant.AIAssistant.ask', return_value='[Person 0] at [Cam 1 @ 0:01]'):
